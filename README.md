@@ -55,13 +55,39 @@ It intentionally simplifies or omits advanced features (broadcast trees, full or
 Prereq: a SystemC installation (tested with SystemC 2.3+).
 
 ```bash
-mkdir -p NoC_TLM/build
-cmake -S NoC_TLM -B NoC_TLM/build -DSYSTEMC_HOME=/path/to/systemc
-cmake --build NoC_TLM/build
-./NoC_TLM/build/noc_sim
+# Configure and build
+mkdir -p build
+cmake -S . -B build -DSYSTEMC_HOME=/path/to/systemc
+cmake --build build -j4
+
+# Run simulation
+./build/noc_sim
 ```
 
-If your SystemC install is configured with `SYSTEMC_HOME` and `SYSTEMC_INCLUDE`/`SYSTEMC_LIBDIR`, CMake should pick it up automatically.
+If your SystemC install is configured with `SYSTEMC_HOME` environment variable, CMake should pick it up automatically.
+
+## Testing
+
+Unit tests are built automatically using Google Test (downloaded via CMake FetchContent).
+
+```bash
+# Run all tests
+./build/noc_overlay_test
+
+# Run specific test suite
+./build/noc_overlay_test --gtest_filter=OverlayRegisterTest.*
+
+# List available tests
+./build/noc_overlay_test --gtest_list_tests
+
+# Run tests with verbose output
+./build/noc_overlay_test --gtest_color=yes
+```
+
+To disable building tests:
+```bash
+cmake -S . -B build -DBUILD_TESTS=OFF
+```
 
 ## Configuration knobs
 
@@ -76,13 +102,16 @@ If your SystemC install is configured with `SYSTEMC_HOME` and `SYSTEMC_INCLUDE`/
 
 ## Files
 
-- `NoC_TLM/CMakeLists.txt`
-- `NoC_TLM/src/noc_types.h`
-- `NoC_TLM/src/noc_link.h`, `NoC_TLM/src/noc_link.cpp`
-- `NoC_TLM/src/noc_router.h`, `NoC_TLM/src/noc_router.cpp`
-- `NoC_TLM/src/noc_mesh.h`, `NoC_TLM/src/noc_mesh.cpp`
-- `NoC_TLM/src/noc_niu.h`, `NoC_TLM/src/noc_niu.cpp`
-- `NoC_TLM/src/traffic_gen.h`, `NoC_TLM/src/traffic_gen.cpp`
-- `NoC_TLM/src/riscv_core.h`, `NoC_TLM/src/riscv_core.cpp`
-- `NoC_TLM/src/tensix_tile.h`, `NoC_TLM/src/tensix_tile.cpp`
-- `NoC_TLM/src/main.cpp`
+- `CMakeLists.txt` - Build configuration
+- `src/noc_types.h` - Core data types (NocCoord, NocPacket, NocFlit)
+- `src/noc_link.h`, `src/noc_link.cpp` - Link latency model
+- `src/noc_router.h`, `src/noc_router.cpp` - Router with deterministic XY routing
+- `src/noc_mesh.h`, `src/noc_mesh.cpp` - 2D torus mesh assembly
+- `src/noc_niu.h`, `src/noc_niu.cpp` - Network Interface Unit with MMIO registers
+- `src/noc_overlay.h`, `src/noc_overlay.cpp` - NoC Overlay coprocessor (64 streams per tile)
+- `src/noc_translation.h`, `src/noc_translation.cpp` - Coordinate translation tables
+- `src/traffic_gen.h`, `src/traffic_gen.cpp` - Traffic generator for testing
+- `src/riscv_core.h`, `src/riscv_core.cpp` - Simple RISC-V core model
+- `src/tensix_tile.h`, `src/tensix_tile.cpp` - Tensix tile with 5 cores and overlay
+- `src/main.cpp` - Main simulation entry point
+- `tests/noc_overlay_test.cpp` - Unit tests for NoC Overlay

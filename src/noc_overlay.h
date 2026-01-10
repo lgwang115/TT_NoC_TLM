@@ -24,21 +24,21 @@ enum class OverlayStreamState : uint8_t {
 
 // Stream capabilities differ by stream index (per spec)
 struct StreamCapabilities {
-  bool can_multicast;           // Streams 0-3 only
-  bool can_receive_gather;      // Streams 0-5 only
-  bool can_transmit_dram;       // Streams 0-3 and 8-11 only
-  bool can_cause_irq;           // Streams 0-3 and 8-11 only
-  bool metadata_includes_header; // Streams 4-5 only
-  unsigned metadata_fifo_capacity;
-  unsigned metadata_fifo_group_size;
-  unsigned l1_read_complete_fifo_capacity;
+  bool can_multicast = false;           // Streams 0-3 only
+  bool can_receive_gather = false;      // Streams 0-5 only
+  bool can_transmit_dram = false;       // Streams 0-3 and 8-11 only
+  bool can_cause_irq = false;           // Streams 0-3 and 8-11 only
+  bool metadata_includes_header = false; // Streams 4-5 only
+  unsigned metadata_fifo_capacity = 0;
+  unsigned metadata_fifo_group_size = 0;
+  unsigned l1_read_complete_fifo_capacity = 0;
 };
 
 // Message metadata FIFO entry
 struct OverlayMsgMetadata {
-  uint32_t buf_ptr;     // Pointer into receive buffer (in 16-byte units)
-  uint32_t msg_length;  // Message length (in 16-byte units)
-  std::array<uint32_t, 4> header; // Copy of message header (streams 4-5 only)
+  uint32_t buf_ptr = 0;     // Pointer into receive buffer (in 16-byte units)
+  uint32_t msg_length = 0;  // Message length (in 16-byte units)
+  std::array<uint32_t, 4> header = {}; // Copy of message header (streams 4-5 only)
 };
 
 // Stream configuration registers
@@ -170,25 +170,25 @@ struct OverlayStream {
 
 // Overlay request to NIU for NoC transmission
 struct OverlayNiuReq {
-  uint8_t stream_id;
-  NocCoord dest;
-  uint64_t dest_addr;
-  uint64_t src_addr;
-  uint32_t length;
-  bool is_posted;
-  bool is_multicast;
-  uint8_t mcast_end_x;
-  uint8_t mcast_end_y;
-  bool mcast_xy;
-  uint8_t vc_class;
-  uint8_t vc_buddy;
+  uint8_t stream_id = 0;
+  NocCoord dest = {};
+  uint64_t dest_addr = 0;
+  uint64_t src_addr = 0;
+  uint32_t length = 0;
+  bool is_posted = false;
+  bool is_multicast = false;
+  uint8_t mcast_end_x = 0;
+  uint8_t mcast_end_y = 0;
+  bool mcast_xy = false;
+  uint8_t vc_class = 0;
+  uint8_t vc_buddy = 0;
 };
 
 // Overlay response from NIU
 struct OverlayNiuResp {
-  uint8_t stream_id;
-  bool success;
-  uint32_t bytes_transferred;
+  uint8_t stream_id = 0;
+  bool success = false;
+  uint32_t bytes_transferred = 0;
 };
 
 // Stream operators for SystemC sc_fifo compatibility
