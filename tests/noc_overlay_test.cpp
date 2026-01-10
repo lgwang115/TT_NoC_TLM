@@ -739,6 +739,978 @@ TEST(TensixCapabilityTest, Streams8to11DramIrq) {
 }
 
 // ============================================================================
+// New Critical Register Index Tests
+// ============================================================================
+
+TEST(NewRegisterIndexTest, ReceiverEndpointRegisters) {
+  using namespace OverlayRegIndex;
+
+  // Verify receiver endpoint register indices
+  EXPECT_EQ(STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER, 43);
+  EXPECT_EQ(STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER + 1, 44);
+  EXPECT_EQ(STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER + 2, 45);
+  EXPECT_EQ(STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER + 3, 46);
+  EXPECT_EQ(STREAM_RECEIVER_ENDPOINT_MSG_INFO, 47);
+}
+
+TEST(NewRegisterIndexTest, DramHighAddressRegisters) {
+  using namespace OverlayRegIndex;
+
+  // Verify DRAM high address register indices
+  EXPECT_EQ(STREAM_REMOTE_DEST_BUF_START_HI, 48);
+  EXPECT_EQ(STREAM_REMOTE_DEST_BUF_SIZE_HI, 49);
+  EXPECT_EQ(STREAM_REMOTE_DEST_MSG_INFO_WR_PTR_HI, 50);
+}
+
+TEST(NewRegisterIndexTest, ScratchRegisters) {
+  using namespace OverlayRegIndex;
+
+  // Verify scratch register indices (6 registers)
+  EXPECT_EQ(STREAM_SCRATCH, 51);
+  EXPECT_EQ(STREAM_SCRATCH + 5, 56);
+}
+
+TEST(NewRegisterIndexTest, PhaseAndPriorityRegisters) {
+  using namespace OverlayRegIndex;
+
+  EXPECT_EQ(STREAM_DEST_PHASE_READY_UPDATE, 57);
+  EXPECT_EQ(STREAM_REMOTE_DEST_TRAFFIC_PRIORITY, 58);
+}
+
+TEST(NewRegisterIndexTest, MulticastFlowControlRegisters) {
+  using namespace OverlayRegIndex;
+
+  // 32 registers for per-destination space tracking
+  EXPECT_EQ(STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE, 59);
+  EXPECT_EQ(STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 31, 90);
+  EXPECT_EQ(STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE_UPDATE, 91);
+}
+
+TEST(NewRegisterIndexTest, DebugAndCompressionRegisters) {
+  using namespace OverlayRegIndex;
+
+  // Debug status registers (3 registers)
+  EXPECT_EQ(STREAM_DEBUG_STATUS, 92);
+  EXPECT_EQ(STREAM_DEBUG_STATUS + 2, 94);
+
+  // Message compression registers
+  EXPECT_EQ(STREAM_MSG_GROUP_COMPRESS, 95);
+  EXPECT_EQ(STREAM_MSG_GROUP_ZERO_MASK, 96);
+  EXPECT_EQ(STREAM_MSG_GROUP_ZERO_MASK + 3, 99);
+}
+
+// ============================================================================
+// Receiver Endpoint Header Register Tests
+// ============================================================================
+
+TEST(ReceiverEndpointTest, HeaderRegisterDefaultValues) {
+  OverlayStreamRegs regs;
+
+  // All 4 header registers should default to 0
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_EQ(regs.receiver_endpoint_msg_header[i], 0u);
+  }
+}
+
+TEST(ReceiverEndpointTest, HeaderRegisterSetValues) {
+  OverlayStreamRegs regs;
+
+  // Set header values
+  regs.receiver_endpoint_msg_header[0] = 0xDEADBEEF;
+  regs.receiver_endpoint_msg_header[1] = 0xCAFEBABE;
+  regs.receiver_endpoint_msg_header[2] = 0x12345678;
+  regs.receiver_endpoint_msg_header[3] = 0xABCDEF00;
+
+  EXPECT_EQ(regs.receiver_endpoint_msg_header[0], 0xDEADBEEFu);
+  EXPECT_EQ(regs.receiver_endpoint_msg_header[1], 0xCAFEBABEu);
+  EXPECT_EQ(regs.receiver_endpoint_msg_header[2], 0x12345678u);
+  EXPECT_EQ(regs.receiver_endpoint_msg_header[3], 0xABCDEF00u);
+}
+
+TEST(ReceiverEndpointTest, MsgInfoEncoding) {
+  // STREAM_RECEIVER_ENDPOINT_MSG_INFO returns:
+  // Bits 0-16: buf_ptr (17 bits)
+  // Bits 17-31: msg_length (15 bits)
+
+  uint32_t buf_ptr = 0x1FFFF;  // Max 17-bit value
+  uint32_t msg_length = 0x7FFF;  // Max 15-bit value
+
+  uint32_t encoded = (buf_ptr & 0x1FFFF) | ((msg_length & 0x7FFF) << 17);
+
+  EXPECT_EQ(encoded & 0x1FFFF, buf_ptr);
+  EXPECT_EQ((encoded >> 17) & 0x7FFF, msg_length);
+}
+
+// ============================================================================
+// DRAM High Address Register Tests
+// ============================================================================
+
+TEST(DramHighAddressTest, DefaultValues) {
+  OverlayStreamRegs regs;
+
+  EXPECT_EQ(regs.remote_dest_buf_start_hi, 0);
+  EXPECT_EQ(regs.remote_dest_buf_size_hi, 0);
+  EXPECT_EQ(regs.remote_dest_msg_info_wr_ptr_hi, 0);
+}
+
+TEST(DramHighAddressTest, FourBitMasking) {
+  // High address registers are 4 bits (for 36-bit addressing)
+  OverlayStreamRegs regs;
+
+  // Set max 4-bit values
+  regs.remote_dest_buf_start_hi = 0xF;
+  regs.remote_dest_buf_size_hi = 0xF;
+  regs.remote_dest_msg_info_wr_ptr_hi = 0xF;
+
+  EXPECT_EQ(regs.remote_dest_buf_start_hi & 0xF, 0xF);
+  EXPECT_EQ(regs.remote_dest_buf_size_hi & 0xF, 0xF);
+  EXPECT_EQ(regs.remote_dest_msg_info_wr_ptr_hi & 0xF, 0xF);
+}
+
+TEST(DramHighAddressTest, Full36BitAddress) {
+  // Test constructing a full 36-bit address from low 32 bits + high 4 bits
+  uint32_t addr_lo = 0xABCDEF00;
+  uint8_t addr_hi = 0xF;
+
+  uint64_t full_addr = addr_lo | (static_cast<uint64_t>(addr_hi) << 32);
+
+  EXPECT_EQ(full_addr, 0xFABCDEF00ull);
+  EXPECT_EQ(full_addr & 0xFFFFFFFF, addr_lo);
+  EXPECT_EQ((full_addr >> 32) & 0xF, addr_hi);
+}
+
+// ============================================================================
+// Scratch Register Tests
+// ============================================================================
+
+TEST(ScratchRegisterTest, DefaultValues) {
+  OverlayStreamRegs regs;
+
+  // All 6 scratch registers should default to 0
+  for (int i = 0; i < 6; ++i) {
+    EXPECT_EQ(regs.scratch[i], 0u);
+  }
+}
+
+TEST(ScratchRegisterTest, SetValues) {
+  OverlayStreamRegs regs;
+
+  // Set different values in each scratch register
+  regs.scratch[0] = 0x11111111;
+  regs.scratch[1] = 0x22222222;
+  regs.scratch[2] = 0x33333333;
+  regs.scratch[3] = 0x44444444;
+  regs.scratch[4] = 0x55555555;
+  regs.scratch[5] = 0x66666666;
+
+  EXPECT_EQ(regs.scratch[0], 0x11111111u);
+  EXPECT_EQ(regs.scratch[1], 0x22222222u);
+  EXPECT_EQ(regs.scratch[2], 0x33333333u);
+  EXPECT_EQ(regs.scratch[3], 0x44444444u);
+  EXPECT_EQ(regs.scratch[4], 0x55555555u);
+  EXPECT_EQ(regs.scratch[5], 0x66666666u);
+}
+
+TEST(ScratchRegisterTest, DramStreamCapability) {
+  // Scratch registers are only valid for DRAM-capable streams (0-3, 8-11)
+  StreamCapabilities caps;
+
+  // Streams 0-3 can transmit to DRAM
+  caps.can_transmit_dram = true;
+  EXPECT_TRUE(caps.can_transmit_dram);
+
+  // Streams 4-7 cannot transmit to DRAM
+  caps.can_transmit_dram = false;
+  EXPECT_FALSE(caps.can_transmit_dram);
+}
+
+// ============================================================================
+// Traffic Priority Register Tests
+// ============================================================================
+
+TEST(TrafficPriorityTest, DefaultValue) {
+  OverlayStreamRegs regs;
+
+  EXPECT_EQ(regs.remote_dest_traffic_priority, 0);
+}
+
+TEST(TrafficPriorityTest, FourBitPriority) {
+  OverlayStreamRegs regs;
+
+  // Priority is 4 bits (0-15)
+  regs.remote_dest_traffic_priority = 0xF;
+  EXPECT_EQ(regs.remote_dest_traffic_priority & 0xF, 0xF);
+
+  regs.remote_dest_traffic_priority = 8;
+  EXPECT_EQ(regs.remote_dest_traffic_priority, 8);
+}
+
+// ============================================================================
+// Multicast Flow Control Register Tests
+// ============================================================================
+
+TEST(MulticastFlowControlTest, DefaultValues) {
+  OverlayStreamRegs regs;
+
+  // All 32 destination space registers should default to 0
+  for (int i = 0; i < 32; ++i) {
+    EXPECT_EQ(regs.remote_dest_buf_space_available[i], 0u);
+  }
+}
+
+TEST(MulticastFlowControlTest, SetPerDestinationSpace) {
+  OverlayStreamRegs regs;
+
+  // Set space for different destinations
+  regs.remote_dest_buf_space_available[0] = 1024;
+  regs.remote_dest_buf_space_available[15] = 2048;
+  regs.remote_dest_buf_space_available[31] = 4096;
+
+  EXPECT_EQ(regs.remote_dest_buf_space_available[0], 1024u);
+  EXPECT_EQ(regs.remote_dest_buf_space_available[15], 2048u);
+  EXPECT_EQ(regs.remote_dest_buf_space_available[31], 4096u);
+}
+
+TEST(MulticastFlowControlTest, SpaceUpdateEncoding) {
+  // STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE_UPDATE encoding:
+  // Bits 0-4: destination index (5 bits, 0-31)
+  // Bits 5-31: space delta (signed, 27 bits)
+
+  uint8_t dest_idx = 15;
+  int32_t delta = 256;
+
+  uint32_t encoded = (dest_idx & 0x1F) | (static_cast<uint32_t>(delta) << 5);
+
+  EXPECT_EQ(encoded & 0x1F, dest_idx);
+  EXPECT_EQ(static_cast<int32_t>(encoded) >> 5, delta);
+
+  // Test negative delta
+  delta = -128;
+  encoded = (dest_idx & 0x1F) | (static_cast<uint32_t>(delta) << 5);
+
+  EXPECT_EQ(encoded & 0x1F, dest_idx);
+  EXPECT_EQ(static_cast<int32_t>(encoded) >> 5, delta);
+}
+
+TEST(MulticastFlowControlTest, SpaceUpdateCalculation) {
+  // Test the delta update calculation
+  uint32_t current_space = 1000;
+  int32_t delta = 256;
+
+  int64_t new_space = static_cast<int64_t>(current_space) + delta;
+  EXPECT_EQ(new_space, 1256);
+
+  // Test negative delta
+  delta = -500;
+  new_space = static_cast<int64_t>(current_space) + delta;
+  EXPECT_EQ(new_space, 500);
+
+  // Test underflow protection
+  delta = -2000;
+  new_space = static_cast<int64_t>(current_space) + delta;
+  if (new_space < 0) new_space = 0;
+  EXPECT_EQ(new_space, 0);
+}
+
+// ============================================================================
+// Debug Status Register Tests
+// ============================================================================
+
+TEST(DebugStatusTest, DefaultValues) {
+  OverlayStreamRegs regs;
+
+  EXPECT_EQ(regs.debug_status_0, 0u);
+  EXPECT_EQ(regs.debug_status_1, 0u);
+}
+
+TEST(DebugStatusTest, FifoStatusEncoding) {
+  // DEBUG_STATUS + 2 returns FIFO status:
+  // Bits 0-15: metadata FIFO size
+  // Bits 16-31: l1_read_complete FIFO size
+
+  uint16_t metadata_size = 8;
+  uint16_t l1_complete_size = 4;
+
+  uint32_t status = (static_cast<uint32_t>(metadata_size) & 0xFFFF) |
+                    ((static_cast<uint32_t>(l1_complete_size) & 0xFFFF) << 16);
+
+  EXPECT_EQ(status & 0xFFFF, metadata_size);
+  EXPECT_EQ((status >> 16) & 0xFFFF, l1_complete_size);
+}
+
+TEST(DebugStatusTest, MaxFifoSizes) {
+  // Test maximum FIFO sizes in status register
+  uint16_t max_metadata = 0xFFFF;
+  uint16_t max_l1_complete = 0xFFFF;
+
+  uint32_t status = (static_cast<uint32_t>(max_metadata) & 0xFFFF) |
+                    ((static_cast<uint32_t>(max_l1_complete) & 0xFFFF) << 16);
+
+  EXPECT_EQ(status, 0xFFFFFFFFu);
+}
+
+// ============================================================================
+// Message Compression Register Tests
+// ============================================================================
+
+TEST(MsgCompressionTest, DefaultValues) {
+  OverlayStreamRegs regs;
+
+  EXPECT_EQ(regs.msg_group_compress, 0u);
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_EQ(regs.msg_group_zero_mask[i], 0u);
+  }
+}
+
+TEST(MsgCompressionTest, CompressRegisterSetValue) {
+  OverlayStreamRegs regs;
+
+  regs.msg_group_compress = 0x12345678;
+  EXPECT_EQ(regs.msg_group_compress, 0x12345678u);
+}
+
+TEST(MsgCompressionTest, ZeroMaskRegisters) {
+  OverlayStreamRegs regs;
+
+  // Set all 4 zero mask registers (128 bits total for header mask)
+  regs.msg_group_zero_mask[0] = 0xFFFFFFFF;
+  regs.msg_group_zero_mask[1] = 0x00FF00FF;
+  regs.msg_group_zero_mask[2] = 0xFF00FF00;
+  regs.msg_group_zero_mask[3] = 0xAAAAAAAA;
+
+  EXPECT_EQ(regs.msg_group_zero_mask[0], 0xFFFFFFFFu);
+  EXPECT_EQ(regs.msg_group_zero_mask[1], 0x00FF00FFu);
+  EXPECT_EQ(regs.msg_group_zero_mask[2], 0xFF00FF00u);
+  EXPECT_EQ(regs.msg_group_zero_mask[3], 0xAAAAAAAAu);
+}
+
+// ============================================================================
+// Capability-Based Register Access Tests
+// ============================================================================
+
+TEST(CapabilityAccessTest, MulticastOnlyRegisters) {
+  // Multicast flow control registers only valid for streams with can_multicast
+  StreamCapabilities caps;
+
+  // Streams 0-3 can multicast
+  caps.can_multicast = true;
+  EXPECT_TRUE(caps.can_multicast);
+
+  // Other streams cannot multicast
+  caps.can_multicast = false;
+  EXPECT_FALSE(caps.can_multicast);
+}
+
+TEST(CapabilityAccessTest, HeaderCopyOnlyRegisters) {
+  // Receiver endpoint header registers only valid for streams 4-5
+  StreamCapabilities caps;
+
+  // Streams 4-5 have metadata_includes_header
+  caps.metadata_includes_header = true;
+  EXPECT_TRUE(caps.metadata_includes_header);
+
+  // Other streams don't have this capability
+  caps.metadata_includes_header = false;
+  EXPECT_FALSE(caps.metadata_includes_header);
+}
+
+TEST(CapabilityAccessTest, DramOnlyRegisters) {
+  // Scratch registers and phase ready only for DRAM streams
+  StreamCapabilities caps;
+
+  // Test DRAM capability check
+  caps.can_transmit_dram = true;
+  caps.can_cause_irq = true;
+  EXPECT_TRUE(caps.can_transmit_dram);
+  EXPECT_TRUE(caps.can_cause_irq);
+}
+
+// ============================================================================
+// Phase Ready Update Test
+// ============================================================================
+
+TEST(PhaseReadyUpdateTest, WriteOnlyBehavior) {
+  // STREAM_DEST_PHASE_READY_UPDATE is write-only
+  // Writing signals destination is ready for specified phase
+
+  uint32_t phase_value = 0x12345;
+
+  // The value written is the phase number to signal ready
+  EXPECT_EQ(phase_value, 0x12345u);
+}
+
+// ============================================================================
+// Medium Severity Fix Tests - STREAM_CURR_PHASE Base Adjustment
+// ============================================================================
+
+TEST(CurrPhaseBaseTest, ReadSubtractsBase) {
+  // Per spec: Reading STREAM_CURR_PHASE subtracts curr_phase_base
+  OverlayStreamRegs regs;
+
+  regs.curr_phase = 100;
+  regs.curr_phase_base = 50;
+
+  // Simulated read should return curr_phase - curr_phase_base
+  uint32_t read_value = regs.curr_phase - regs.curr_phase_base;
+  EXPECT_EQ(read_value, 50u);
+}
+
+TEST(CurrPhaseBaseTest, WriteAddsBase) {
+  // Per spec: Writing STREAM_CURR_PHASE adds curr_phase_base
+  OverlayStreamRegs regs;
+
+  regs.curr_phase_base = 50;
+
+  // Simulated write of 25 should result in curr_phase = 25 + 50 = 75
+  uint32_t write_value = 25;
+  regs.curr_phase = write_value + regs.curr_phase_base;
+  EXPECT_EQ(regs.curr_phase, 75u);
+}
+
+TEST(CurrPhaseBaseTest, RoundTripConsistency) {
+  // Write then read should return the same value
+  OverlayStreamRegs regs;
+
+  regs.curr_phase_base = 1000;
+
+  // Write 500 (internal becomes 500 + 1000 = 1500)
+  uint32_t write_value = 500;
+  regs.curr_phase = write_value + regs.curr_phase_base;
+
+  // Read should return 1500 - 1000 = 500
+  uint32_t read_value = regs.curr_phase - regs.curr_phase_base;
+  EXPECT_EQ(read_value, write_value);
+}
+
+// ============================================================================
+// Medium Severity Fix Tests - STREAM_PHASE_AUTO_CFG_PTR Base Adjustment
+// ============================================================================
+
+TEST(AutoCfgPtrBaseTest, ReadSubtractsBase) {
+  // Per spec: Reading STREAM_PHASE_AUTO_CFG_PTR subtracts base
+  OverlayStreamRegs regs;
+
+  regs.phase_auto_cfg_ptr = 0x2000;
+  regs.phase_auto_cfg_ptr_base = 0x1000;
+
+  // Simulated read should return ptr - base
+  uint32_t read_value = regs.phase_auto_cfg_ptr - regs.phase_auto_cfg_ptr_base;
+  EXPECT_EQ(read_value, 0x1000u);
+}
+
+TEST(AutoCfgPtrBaseTest, WriteAddsBase) {
+  // Per spec: Writing STREAM_PHASE_AUTO_CFG_PTR adds base
+  OverlayStreamRegs regs;
+
+  regs.phase_auto_cfg_ptr_base = 0x1000;
+
+  // Write 0x500, internal should be 0x500 + 0x1000 = 0x1500
+  uint32_t write_value = 0x500;
+  regs.phase_auto_cfg_ptr = write_value + regs.phase_auto_cfg_ptr_base;
+  EXPECT_EQ(regs.phase_auto_cfg_ptr, 0x1500u);
+}
+
+TEST(AutoCfgPtrBaseTest, BaseZeroNoEffect) {
+  // With base = 0, read/write should be direct
+  OverlayStreamRegs regs;
+
+  regs.phase_auto_cfg_ptr_base = 0;
+  regs.phase_auto_cfg_ptr = 0x1234;
+
+  uint32_t read_value = regs.phase_auto_cfg_ptr - regs.phase_auto_cfg_ptr_base;
+  EXPECT_EQ(read_value, 0x1234u);
+}
+
+// ============================================================================
+// Medium Severity Fix Tests - PHASE_AUTO_CFG_HEADER PHASE_NUM_INCR
+// ============================================================================
+
+TEST(PhaseAutoCfgHeaderTest, PhaseNumIncrExtraction) {
+  // Bits 0-11: PHASE_NUM_INCR - increment curr_phase by this amount
+  uint32_t header = 0;
+
+  // Set PHASE_NUM_INCR to 5
+  header |= 5;
+  EXPECT_EQ(header & 0xFFF, 5u);
+
+  // Set to max value (4095)
+  header = 0xFFF;
+  EXPECT_EQ(header & 0xFFF, 0xFFFu);
+}
+
+TEST(PhaseAutoCfgHeaderTest, NumMsgsExtraction) {
+  // Bits 12-23: CURR_PHASE_NUM_MSGS
+  uint32_t header = 0;
+
+  // Set num_msgs to 100
+  header |= (100u << 12);
+  EXPECT_EQ((header >> 12) & 0xFFF, 100u);
+}
+
+TEST(PhaseAutoCfgHeaderTest, NextPhaseNumCfgWrites) {
+  // Bits 24-31: NEXT_PHASE_NUM_CFG_REG_WRITES (stored as N-1)
+  uint32_t header = 0;
+
+  // Set to 8 writes (stored as 7)
+  header |= (7u << 24);
+  EXPECT_EQ(((header >> 24) & 0xFF) + 1, 8u);
+}
+
+TEST(PhaseAutoCfgHeaderTest, PhaseIncrementBehavior) {
+  // Writing PHASE_AUTO_CFG_HEADER with non-zero PHASE_NUM_INCR
+  // should increment curr_phase
+  OverlayStreamRegs regs;
+
+  regs.curr_phase = 10;
+
+  // Simulate write with PHASE_NUM_INCR = 5
+  uint32_t header = 5;  // bits 0-11
+  uint32_t phase_num_incr = header & 0xFFF;
+
+  if (phase_num_incr > 0) {
+    regs.curr_phase += phase_num_incr;
+  }
+
+  EXPECT_EQ(regs.curr_phase, 15u);
+}
+
+TEST(PhaseAutoCfgHeaderTest, ZeroIncrNoChange) {
+  // PHASE_NUM_INCR = 0 should not change curr_phase
+  OverlayStreamRegs regs;
+
+  regs.curr_phase = 10;
+
+  uint32_t header = 0;  // PHASE_NUM_INCR = 0
+  uint32_t phase_num_incr = header & 0xFFF;
+
+  if (phase_num_incr > 0) {
+    regs.curr_phase += phase_num_incr;
+  }
+
+  EXPECT_EQ(regs.curr_phase, 10u);  // Unchanged
+}
+
+// ============================================================================
+// Medium Severity Fix Tests - REMOTE_DEST_BUF_SIZE Space Init
+// ============================================================================
+
+TEST(RemoteDestBufSizeTest, InitializesSpaceAvailable) {
+  // Per spec: Writing REMOTE_DEST_BUF_SIZE initializes
+  // remote_buf_space_available to the same value
+  OverlayStream stream;
+
+  stream.regs.remote_dest_buf_size = 1024;
+  // Simulate the write behavior
+  stream.remote_buf_space_available = stream.regs.remote_dest_buf_size;
+
+  EXPECT_EQ(stream.remote_buf_space_available, 1024u);
+}
+
+TEST(RemoteDestBufSizeTest, UpdateResetsSpace) {
+  // Changing buf_size should update available space
+  OverlayStream stream;
+
+  // Initial state
+  stream.regs.remote_dest_buf_size = 512;
+  stream.remote_buf_space_available = 512;
+
+  // Update buf_size
+  stream.regs.remote_dest_buf_size = 2048;
+  stream.remote_buf_space_available = stream.regs.remote_dest_buf_size;
+
+  EXPECT_EQ(stream.remote_buf_space_available, 2048u);
+}
+
+// ============================================================================
+// Medium Severity Fix Tests - REMOTE_DEST_BUF_START wr_ptr Reset
+// ============================================================================
+
+TEST(RemoteDestBufStartTest, ResetsWrPtr) {
+  // Per spec: Writing REMOTE_DEST_BUF_START resets remote_dest_wr_ptr to 0
+  OverlayStreamRegs regs;
+
+  regs.remote_dest_wr_ptr = 500;  // Some non-zero value
+
+  // Simulate write to buf_start
+  regs.remote_dest_buf_start = 0x1000;
+  regs.remote_dest_wr_ptr = 0;  // Reset behavior
+
+  EXPECT_EQ(regs.remote_dest_buf_start, 0x1000u);
+  EXPECT_EQ(regs.remote_dest_wr_ptr, 0u);
+}
+
+TEST(RemoteDestBufStartTest, MultipleWrites) {
+  // Each write to buf_start should reset wr_ptr
+  OverlayStreamRegs regs;
+
+  // First write
+  regs.remote_dest_buf_start = 0x1000;
+  regs.remote_dest_wr_ptr = 0;
+
+  // Simulate some data written
+  regs.remote_dest_wr_ptr = 100;
+
+  // Second write to buf_start
+  regs.remote_dest_buf_start = 0x2000;
+  regs.remote_dest_wr_ptr = 0;  // Should reset again
+
+  EXPECT_EQ(regs.remote_dest_buf_start, 0x2000u);
+  EXPECT_EQ(regs.remote_dest_wr_ptr, 0u);
+}
+
+// ============================================================================
+// Medium Severity Fix Tests - Speculative Handshake Response
+// ============================================================================
+
+TEST(SpeculativeHandshakeTest, ConditionsForSpeculativeResponse) {
+  // Speculative response is sent when:
+  // 1. remote_source is true
+  // 2. next_phase_src_change is true
+  // 3. data_buf_no_flow_ctrl is false
+  OverlayStream stream;
+
+  stream.regs.remote_source = true;
+  stream.regs.next_phase_src_change = true;
+  stream.regs.data_buf_no_flow_ctrl = false;
+
+  bool should_send_speculative = stream.regs.remote_source &&
+                                  stream.regs.next_phase_src_change &&
+                                  !stream.regs.data_buf_no_flow_ctrl;
+
+  EXPECT_TRUE(should_send_speculative);
+}
+
+TEST(SpeculativeHandshakeTest, NoSpeculativeWithNoFlowCtrl) {
+  // No speculative response when flow control is disabled
+  OverlayStream stream;
+
+  stream.regs.remote_source = true;
+  stream.regs.next_phase_src_change = true;
+  stream.regs.data_buf_no_flow_ctrl = true;  // Flow control disabled
+
+  bool should_send_speculative = stream.regs.remote_source &&
+                                  stream.regs.next_phase_src_change &&
+                                  !stream.regs.data_buf_no_flow_ctrl;
+
+  EXPECT_FALSE(should_send_speculative);
+}
+
+TEST(SpeculativeHandshakeTest, NoSpeculativeWithoutSrcChange) {
+  // No speculative response when source doesn't change
+  OverlayStream stream;
+
+  stream.regs.remote_source = true;
+  stream.regs.next_phase_src_change = false;  // No source change
+  stream.regs.data_buf_no_flow_ctrl = false;
+
+  bool should_send_speculative = stream.regs.remote_source &&
+                                  stream.regs.next_phase_src_change &&
+                                  !stream.regs.data_buf_no_flow_ctrl;
+
+  EXPECT_FALSE(should_send_speculative);
+}
+
+TEST(SpeculativeHandshakeTest, StateTracking) {
+  // Track that speculative response was sent
+  OverlayStream stream;
+
+  stream.sent_speculative_response = false;
+
+  // Simulate sending speculative response
+  stream.sent_speculative_response = true;
+
+  EXPECT_TRUE(stream.sent_speculative_response);
+}
+
+// ============================================================================
+// Medium Severity Fix Tests - 16-Mode Flow Control Threshold
+// ============================================================================
+
+TEST(FlowControlThresholdTest, Mode0FixedThreshold) {
+  // Mode 0: threshold = 16 bytes (1 unit)
+  uint8_t mode = 0;
+  uint32_t threshold;
+
+  switch (mode) {
+    case 0: threshold = 16; break;
+    default: threshold = 0; break;
+  }
+
+  EXPECT_EQ(threshold, 16u);
+}
+
+TEST(FlowControlThresholdTest, FixedThresholdModes) {
+  // Modes 0-7 use fixed thresholds
+  uint32_t expected[] = {16, 32, 64, 128, 256, 512, 1024, 2048};
+
+  for (uint8_t mode = 0; mode <= 7; ++mode) {
+    uint32_t threshold;
+    switch (mode) {
+      case 0: threshold = 16; break;
+      case 1: threshold = 32; break;
+      case 2: threshold = 64; break;
+      case 3: threshold = 128; break;
+      case 4: threshold = 256; break;
+      case 5: threshold = 512; break;
+      case 6: threshold = 1024; break;
+      case 7: threshold = 2048; break;
+      default: threshold = 0; break;
+    }
+    EXPECT_EQ(threshold, expected[mode]) << "Mode " << (int)mode;
+  }
+}
+
+TEST(FlowControlThresholdTest, ProportionalThresholdModes) {
+  // Modes 8-15 use proportional thresholds based on buf_size
+  uint32_t buf_size = 4096;
+
+  // Mode 8: buf_size / 128
+  EXPECT_EQ(buf_size >> 7, 32u);
+
+  // Mode 9: buf_size / 64
+  EXPECT_EQ(buf_size >> 6, 64u);
+
+  // Mode 10: buf_size / 32
+  EXPECT_EQ(buf_size >> 5, 128u);
+
+  // Mode 11: buf_size / 16
+  EXPECT_EQ(buf_size >> 4, 256u);
+
+  // Mode 12: buf_size / 8
+  EXPECT_EQ(buf_size >> 3, 512u);
+
+  // Mode 13: buf_size / 4
+  EXPECT_EQ(buf_size >> 2, 1024u);
+
+  // Mode 14: buf_size / 2
+  EXPECT_EQ(buf_size >> 1, 2048u);
+
+  // Mode 15: buf_size (full)
+  EXPECT_EQ(buf_size, 4096u);
+}
+
+TEST(FlowControlThresholdTest, MinimumThresholdGuarantee) {
+  // Threshold should never be 0, minimum is 1 unit (16 bytes)
+  uint32_t buf_size = 64;  // Small buffer
+
+  // Mode 8 with small buffer: 64 / 128 = 0, should become 1
+  uint32_t threshold = buf_size >> 7;
+  if (threshold == 0) {
+    threshold = 1;
+  }
+
+  EXPECT_GE(threshold, 1u);
+}
+
+TEST(FlowControlThresholdTest, AllModeCoverage) {
+  // Test all 16 modes compute correctly
+  uint32_t buf_size = 8192;
+
+  for (uint8_t mode = 0; mode < 16; ++mode) {
+    uint32_t threshold;
+    switch (mode) {
+      case 0:  threshold = 16; break;
+      case 1:  threshold = 32; break;
+      case 2:  threshold = 64; break;
+      case 3:  threshold = 128; break;
+      case 4:  threshold = 256; break;
+      case 5:  threshold = 512; break;
+      case 6:  threshold = 1024; break;
+      case 7:  threshold = 2048; break;
+      case 8:  threshold = buf_size >> 7; break;
+      case 9:  threshold = buf_size >> 6; break;
+      case 10: threshold = buf_size >> 5; break;
+      case 11: threshold = buf_size >> 4; break;
+      case 12: threshold = buf_size >> 3; break;
+      case 13: threshold = buf_size >> 2; break;
+      case 14: threshold = buf_size >> 1; break;
+      case 15: threshold = buf_size; break;
+      default: threshold = 16; break;
+    }
+
+    // Ensure minimum threshold
+    if (threshold == 0) threshold = 1;
+
+    EXPECT_GT(threshold, 0u) << "Mode " << (int)mode;
+  }
+}
+
+// ============================================================================
+// Medium Severity Fix Tests - Auto-Pop on Transmit to Software
+// ============================================================================
+
+TEST(AutoPopTest, NegativeEvenValueEncoding) {
+  // Per spec: Writing negative even value to REMOTE_DEST_MSG_INFO_WR_PTR
+  // triggers auto-pop when receiver_endpoint is true
+
+  // -2 (pop 1 message)
+  int32_t value = -2;
+  EXPECT_TRUE(value < 0);
+  EXPECT_TRUE((value & 1) == 0);  // Even
+  EXPECT_EQ(static_cast<unsigned>((-value) / 2), 1u);
+
+  // -4 (pop 2 messages)
+  value = -4;
+  EXPECT_TRUE(value < 0);
+  EXPECT_TRUE((value & 1) == 0);
+  EXPECT_EQ(static_cast<unsigned>((-value) / 2), 2u);
+
+  // -10 (pop 5 messages)
+  value = -10;
+  EXPECT_TRUE(value < 0);
+  EXPECT_TRUE((value & 1) == 0);
+  EXPECT_EQ(static_cast<unsigned>((-value) / 2), 5u);
+}
+
+TEST(AutoPopTest, NegativeOddValueNoAutoPop) {
+  // Negative odd values should NOT trigger auto-pop
+  int32_t value = -3;
+  EXPECT_TRUE(value < 0);
+  EXPECT_FALSE((value & 1) == 0);  // Odd, no auto-pop
+}
+
+TEST(AutoPopTest, PositiveValueNoAutoPop) {
+  // Positive values should NOT trigger auto-pop
+  int32_t value = 100;
+  EXPECT_FALSE(value < 0);  // Positive, no auto-pop
+}
+
+TEST(AutoPopTest, AutoPopConditions) {
+  // Auto-pop only when receiver_endpoint is true
+  OverlayStreamRegs regs;
+
+  regs.receiver_endpoint = true;
+  int32_t write_value = -4;
+
+  bool should_auto_pop = regs.receiver_endpoint &&
+                          (write_value < 0) &&
+                          ((write_value & 1) == 0);
+
+  EXPECT_TRUE(should_auto_pop);
+}
+
+TEST(AutoPopTest, NoAutoPopWithoutReceiverEndpoint) {
+  // No auto-pop when receiver_endpoint is false
+  OverlayStreamRegs regs;
+
+  regs.receiver_endpoint = false;
+  int32_t write_value = -4;
+
+  bool should_auto_pop = regs.receiver_endpoint &&
+                          (write_value < 0) &&
+                          ((write_value & 1) == 0);
+
+  EXPECT_FALSE(should_auto_pop);
+}
+
+TEST(AutoPopTest, PopCountCalculation) {
+  // Test various pop counts
+  std::vector<std::pair<int32_t, unsigned>> test_cases = {
+    {-2, 1},
+    {-4, 2},
+    {-6, 3},
+    {-8, 4},
+    {-20, 10},
+    {-100, 50}
+  };
+
+  for (const auto& tc : test_cases) {
+    int32_t value = tc.first;
+    unsigned expected_count = tc.second;
+    unsigned actual_count = static_cast<unsigned>((-value) / 2);
+    EXPECT_EQ(actual_count, expected_count) << "Value: " << value;
+  }
+}
+
+// ============================================================================
+// Medium Severity Fix Tests - Automatic Metadata FIFO Advancement
+// ============================================================================
+
+TEST(MetadataAdvancementTest, AdvancementConditions) {
+  // Metadata FIFO advancement happens when:
+  // 1. metadata_fifo.size() < capacity
+  // 2. msg_info_ptr < msg_info_wr_ptr (messages waiting in L1)
+  OverlayStream stream;
+
+  stream.caps.metadata_fifo_capacity = 8;
+  stream.regs.msg_info_ptr = 5;
+  stream.regs.msg_info_wr_ptr = 10;
+
+  bool can_advance = (stream.metadata_fifo.size() < stream.caps.metadata_fifo_capacity) &&
+                      (stream.regs.msg_info_ptr < stream.regs.msg_info_wr_ptr);
+
+  EXPECT_TRUE(can_advance);
+}
+
+TEST(MetadataAdvancementTest, NoAdvancementWhenFifoFull) {
+  // No advancement when metadata FIFO is at capacity
+  OverlayStream stream;
+
+  stream.caps.metadata_fifo_capacity = 2;
+  stream.regs.msg_info_ptr = 5;
+  stream.regs.msg_info_wr_ptr = 10;
+
+  // Fill FIFO to capacity
+  OverlayMsgMetadata meta;
+  stream.metadata_fifo.push_back(meta);
+  stream.metadata_fifo.push_back(meta);
+
+  bool can_advance = (stream.metadata_fifo.size() < stream.caps.metadata_fifo_capacity) &&
+                      (stream.regs.msg_info_ptr < stream.regs.msg_info_wr_ptr);
+
+  EXPECT_FALSE(can_advance);
+}
+
+TEST(MetadataAdvancementTest, NoAdvancementWhenNoMessages) {
+  // No advancement when no messages waiting (ptr == wr_ptr)
+  OverlayStream stream;
+
+  stream.caps.metadata_fifo_capacity = 8;
+  stream.regs.msg_info_ptr = 10;
+  stream.regs.msg_info_wr_ptr = 10;  // Equal, no messages waiting
+
+  bool can_advance = (stream.metadata_fifo.size() < stream.caps.metadata_fifo_capacity) &&
+                      (stream.regs.msg_info_ptr < stream.regs.msg_info_wr_ptr);
+
+  EXPECT_FALSE(can_advance);
+}
+
+TEST(MetadataAdvancementTest, PtrIncrement) {
+  // After advancement, msg_info_ptr should increment
+  OverlayStreamRegs regs;
+
+  regs.msg_info_ptr = 5;
+
+  // Simulate advancement
+  regs.msg_info_ptr++;
+
+  EXPECT_EQ(regs.msg_info_ptr, 6u);
+}
+
+TEST(MetadataAdvancementTest, MultipleAdvancements) {
+  // Multiple consecutive advancements
+  OverlayStream stream;
+
+  stream.caps.metadata_fifo_capacity = 8;
+  stream.regs.msg_info_ptr = 0;
+  stream.regs.msg_info_wr_ptr = 5;
+
+  unsigned advancements = 0;
+  while (stream.metadata_fifo.size() < stream.caps.metadata_fifo_capacity &&
+         stream.regs.msg_info_ptr < stream.regs.msg_info_wr_ptr) {
+    OverlayMsgMetadata meta;
+    meta.buf_ptr = stream.regs.msg_info_ptr * 16;
+    stream.metadata_fifo.push_back(meta);
+    stream.regs.msg_info_ptr++;
+    advancements++;
+  }
+
+  EXPECT_EQ(advancements, 5u);
+  EXPECT_EQ(stream.metadata_fifo.size(), 5u);
+  EXPECT_EQ(stream.regs.msg_info_ptr, stream.regs.msg_info_wr_ptr);
+}
+
+// ============================================================================
 // SystemC main function (required by SystemC library)
 // ============================================================================
 

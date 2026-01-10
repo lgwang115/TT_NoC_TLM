@@ -126,6 +126,31 @@ struct OverlayStreamRegs {
 
   // Flow control state
   uint32_t last_ack_space_available = 0;  // Track when to send flow control
+
+  // Receiver endpoint header registers (streams 4-5 only, for MATH/PACK cores)
+  std::array<uint32_t, 4> receiver_endpoint_msg_header = {};  // 4 words for header copy
+
+  // DRAM high address bits (for 36-bit addressing)
+  uint8_t remote_dest_buf_start_hi = 0;  // Upper 4 bits
+  uint8_t remote_dest_buf_size_hi = 0;   // Upper 4 bits
+  uint8_t remote_dest_msg_info_wr_ptr_hi = 0;  // Upper 4 bits
+
+  // Scratch registers for NCRISC/IRQ configuration (DRAM streams)
+  std::array<uint32_t, 6> scratch = {};
+
+  // Traffic priority for multicast
+  uint8_t remote_dest_traffic_priority = 0;  // 4-bit priority
+
+  // Multicast flow control (per-destination space tracking)
+  std::array<uint32_t, 32> remote_dest_buf_space_available = {};
+
+  // Message compression/analysis registers
+  uint32_t msg_group_compress = 0;
+  std::array<uint32_t, 4> msg_group_zero_mask = {};  // 4 registers for header mask
+
+  // Debug status
+  uint32_t debug_status_0 = 0;
+  uint32_t debug_status_1 = 0;
 };
 
 // Handshake packet types for flow control
@@ -342,6 +367,35 @@ namespace OverlayRegIndex {
   constexpr uint8_t STREAM_GATHER_CLEAR = 38;
   constexpr uint8_t STREAM_LOCAL_SRC_MASK = 39;  // 3 registers (39, 40, 41)
   constexpr uint8_t STREAM_LOCAL_DEST = 42;
+
+  // Receiver endpoint registers (streams 4-5 only)
+  constexpr uint8_t STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER = 43;  // 4 regs (43-46)
+  constexpr uint8_t STREAM_RECEIVER_ENDPOINT_MSG_INFO = 47;  // Peek metadata FIFO
+
+  // DRAM high address registers (36-bit addressing)
+  constexpr uint8_t STREAM_REMOTE_DEST_BUF_START_HI = 48;
+  constexpr uint8_t STREAM_REMOTE_DEST_BUF_SIZE_HI = 49;
+  constexpr uint8_t STREAM_REMOTE_DEST_MSG_INFO_WR_PTR_HI = 50;
+
+  // Scratch registers for NCRISC/IRQ (DRAM streams 0-3, 8-11)
+  constexpr uint8_t STREAM_SCRATCH = 51;  // 6 registers (51-56)
+
+  // Phase ready update for DRAM handshake
+  constexpr uint8_t STREAM_DEST_PHASE_READY_UPDATE = 57;
+
+  // Traffic priority
+  constexpr uint8_t STREAM_REMOTE_DEST_TRAFFIC_PRIORITY = 58;
+
+  // Multicast flow control (32 destinations)
+  constexpr uint8_t STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE = 59;  // 32 regs (59-90)
+  constexpr uint8_t STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE_UPDATE = 91;
+
+  // Debug status registers
+  constexpr uint8_t STREAM_DEBUG_STATUS = 92;  // 3 registers (92-94)
+
+  // Message group compression/analysis
+  constexpr uint8_t STREAM_MSG_GROUP_COMPRESS = 95;
+  constexpr uint8_t STREAM_MSG_GROUP_ZERO_MASK = 96;  // 4 registers (96-99)
 }
 
 #endif

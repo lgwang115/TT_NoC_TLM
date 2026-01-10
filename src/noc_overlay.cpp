@@ -161,10 +161,48 @@ void NocOverlay::process_stream(unsigned stream_id) {
 
     case OverlayStreamState::Running:
       // Normal operation - receiving and transmitting messages
+
+      // Per spec: Automatic metadata FIFO advancement
+      // When there's space in metadata FIFO and messages waiting in L1 message
+      // header array, hardware should promptly advance MSG_INFO_PTR
+      if (stream.metadata_fifo.size() < stream.caps.metadata_fifo_capacity &&
+          stream.regs.msg_info_ptr < stream.regs.msg_info_wr_ptr &&
+          l1_mem_ != nullptr) {
+        // Read message info from L1 message header array
+        uint64_t hdr_addr = stream.regs.msg_info_ptr << 4;
+        uint32_t msg_length = extract_msg_length(
+            l1_mem_->data() + std::min(hdr_addr, static_cast<uint64_t>(l1_mem_->size() - 16)));
+
+        // Calculate buffer pointer based on current read position
+        uint32_t buf_ptr = stream.regs.rd_ptr;
+
+        // Push to metadata FIFO
+        OverlayMsgMetadata meta;
+        meta.buf_ptr = buf_ptr;
+        meta.msg_length = msg_length;
+
+        // If this stream includes header copies, read header from L1
+        if (stream.caps.metadata_includes_header) {
+          for (int i = 0; i < 4; ++i) {
+            meta.header[i] = l1_read_u32(hdr_addr + i * 4);
+          }
+        }
+
+        stream.metadata_fifo.push_back(meta);
+        stream.regs.msg_info_ptr++;
+      }
+
       // Handle handshake protocol for remote transmit
       if (stream.regs.remote_receiver && !stream.regs.dest_data_buf_no_flow_ctrl) {
         if (!stream.handshake_sent) {
           send_handshake_request(stream_id);
+        }
+      }
+
+      // Handle flow control updates for receiver streams
+      if (stream.regs.remote_source && !stream.regs.data_buf_no_flow_ctrl) {
+        if (should_send_flow_control(stream_id)) {
+          send_flow_control_update(stream_id);
         }
       }
 
@@ -209,6 +247,15 @@ void NocOverlay::start_phase(unsigned stream_id) {
 
   stream.regs.curr_phase++;
   stream.handshake_phase = stream.regs.curr_phase;
+
+  // Per spec: If this stream receives from a remote source (receiver) and
+  // NEXT_PHASE_SRC_CHANGE is set, send speculative handshake response
+  // before even receiving the handshake request
+  if (stream.regs.remote_source && stream.regs.next_phase_src_change &&
+      !stream.regs.data_buf_no_flow_ctrl) {
+    send_handshake_response(stream_id);
+    stream.sent_speculative_response = true;
+  }
 
   std::cout << sc_core::sc_time_stamp() << " overlay (" << coord_to_string(coord)
             << ") stream " << stream_id << " starting phase " << stream.regs.curr_phase
@@ -526,7 +573,8 @@ uint32_t NocOverlay::read_reg(uint8_t stream_id, uint8_t reg_id) {
       return stream.regs.phase_auto_cfg_header;
 
     case STREAM_CURR_PHASE:
-      return stream.regs.curr_phase;
+      // Per spec: base is subtracted on read, added on write
+      return stream.regs.curr_phase - stream.regs.curr_phase_base;
 
     case STREAM_CURR_PHASE_BASE:
       return stream.regs.curr_phase_base;
@@ -575,7 +623,8 @@ uint32_t NocOverlay::read_reg(uint8_t stream_id, uint8_t reg_id) {
 
     // Auto-config registers
     case STREAM_PHASE_AUTO_CFG_PTR:
-      return stream.regs.phase_auto_cfg_ptr;
+      // Per spec: base is subtracted on read, added on write
+      return stream.regs.phase_auto_cfg_ptr - stream.regs.phase_auto_cfg_ptr_base;
 
     case STREAM_PHASE_AUTO_CFG_PTR_BASE:
       return stream.regs.phase_auto_cfg_ptr_base;
@@ -620,6 +669,118 @@ uint32_t NocOverlay::read_reg(uint8_t stream_id, uint8_t reg_id) {
     case STREAM_LOCAL_DEST:
       return stream.regs.local_dest_stream_id |
              (static_cast<uint32_t>(stream.regs.local_dest_msg_clear_num) << 6);
+
+    // Receiver endpoint registers (streams 4-5 only)
+    case STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER:
+    case STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER + 1:
+    case STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER + 2:
+    case STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER + 3:
+      if (stream.caps.metadata_includes_header) {
+        return stream.regs.receiver_endpoint_msg_header[reg_id - STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER];
+      }
+      return 0;
+
+    case STREAM_RECEIVER_ENDPOINT_MSG_INFO:
+      // Per spec: Peek at metadata FIFO entry for streams 4-5
+      // Returns buf_ptr in lower 17 bits, msg_length in upper 15 bits
+      if (stream.caps.metadata_includes_header && !stream.metadata_fifo.empty()) {
+        const auto& meta = stream.metadata_fifo.front();
+        return (meta.buf_ptr & 0x1FFFF) | ((meta.msg_length & 0x7FFF) << 17);
+      }
+      return 0;
+
+    // DRAM high address registers
+    case STREAM_REMOTE_DEST_BUF_START_HI:
+      return stream.regs.remote_dest_buf_start_hi & 0xF;
+
+    case STREAM_REMOTE_DEST_BUF_SIZE_HI:
+      return stream.regs.remote_dest_buf_size_hi & 0xF;
+
+    case STREAM_REMOTE_DEST_MSG_INFO_WR_PTR_HI:
+      return stream.regs.remote_dest_msg_info_wr_ptr_hi & 0xF;
+
+    // Scratch registers (DRAM streams only)
+    case STREAM_SCRATCH:
+    case STREAM_SCRATCH + 1:
+    case STREAM_SCRATCH + 2:
+    case STREAM_SCRATCH + 3:
+    case STREAM_SCRATCH + 4:
+    case STREAM_SCRATCH + 5:
+      if (stream.caps.can_transmit_dram) {
+        return stream.regs.scratch[reg_id - STREAM_SCRATCH];
+      }
+      return 0;
+
+    case STREAM_DEST_PHASE_READY_UPDATE:
+      // Write-only register, return 0 on read
+      return 0;
+
+    case STREAM_REMOTE_DEST_TRAFFIC_PRIORITY:
+      return stream.regs.remote_dest_traffic_priority & 0xF;
+
+    // Multicast flow control (32 destinations)
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 1:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 2:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 3:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 4:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 5:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 6:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 7:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 8:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 9:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 10:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 11:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 12:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 13:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 14:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 15:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 16:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 17:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 18:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 19:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 20:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 21:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 22:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 23:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 24:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 25:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 26:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 27:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 28:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 29:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 30:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 31:
+      if (stream.caps.can_multicast) {
+        return stream.regs.remote_dest_buf_space_available[reg_id - STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE];
+      }
+      return 0;
+
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE_UPDATE:
+      // Write-only register, return 0 on read
+      return 0;
+
+    // Debug status registers
+    case STREAM_DEBUG_STATUS:
+      return stream.regs.debug_status_0;
+
+    case STREAM_DEBUG_STATUS + 1:
+      return stream.regs.debug_status_1;
+
+    case STREAM_DEBUG_STATUS + 2:
+      // Return L1 FIFO status: metadata FIFO size and l1_read_complete FIFO size
+      return (static_cast<uint32_t>(stream.metadata_fifo.size()) & 0xFFFF) |
+             ((static_cast<uint32_t>(stream.l1_read_complete_fifo.size()) & 0xFFFF) << 16);
+
+    // Message group compression/analysis
+    case STREAM_MSG_GROUP_COMPRESS:
+      return stream.regs.msg_group_compress;
+
+    case STREAM_MSG_GROUP_ZERO_MASK:
+    case STREAM_MSG_GROUP_ZERO_MASK + 1:
+    case STREAM_MSG_GROUP_ZERO_MASK + 2:
+    case STREAM_MSG_GROUP_ZERO_MASK + 3:
+      return stream.regs.msg_group_zero_mask[reg_id - STREAM_MSG_GROUP_ZERO_MASK];
 
     default:
       return 0;
@@ -705,15 +866,40 @@ void NocOverlay::write_reg(uint8_t stream_id, uint8_t reg_id, uint32_t value) {
 
     case STREAM_REMOTE_DEST_BUF_START:
       stream.regs.remote_dest_buf_start = value;
+      // Per spec: writing buf_start also resets wr_ptr to zero
+      stream.regs.remote_dest_wr_ptr = 0;
       break;
 
     case STREAM_REMOTE_DEST_BUF_SIZE:
       stream.regs.remote_dest_buf_size = value;
+      // Per spec: writing buf_size initializes all remote buffer space available
+      // This sets the transmitter's view of receiver space
+      stream.remote_buf_space_available = value;
       break;
 
-    case STREAM_REMOTE_DEST_MSG_INFO_WR_PTR:
+    case STREAM_REMOTE_DEST_MSG_INFO_WR_PTR: {
       stream.regs.remote_dest_msg_info_wr_ptr = value;
+      // Per spec: When transmitting to software (receiver_endpoint), writing a
+      // negative even value triggers automatic message popping from FIFOs.
+      // The value (as signed) indicates how many messages to auto-pop.
+      if (stream.regs.receiver_endpoint) {
+        int32_t signed_val = static_cast<int32_t>(value);
+        if (signed_val < 0 && (signed_val & 1) == 0) {
+          // Negative even value: auto-pop |signed_val/2| messages
+          unsigned num_to_pop = static_cast<unsigned>((-signed_val) / 2);
+          for (unsigned i = 0; i < num_to_pop && !stream.metadata_fifo.empty(); ++i) {
+            uint32_t msg_len = stream.metadata_fifo.front().msg_length;
+            stream.metadata_fifo.pop_front();
+            // Also advance read pointer
+            stream.regs.rd_ptr += msg_len;
+            if (stream.regs.rd_ptr >= stream.regs.buf_size) {
+              stream.regs.rd_ptr -= stream.regs.buf_size;
+            }
+          }
+        }
+      }
       break;
+    }
 
     case STREAM_REMOTE_DEST_WR_PTR:
       stream.regs.remote_dest_wr_ptr = value;
@@ -737,9 +923,26 @@ void NocOverlay::write_reg(uint8_t stream_id, uint8_t reg_id, uint32_t value) {
       }
       break;
 
-    case STREAM_PHASE_AUTO_CFG_HEADER:
+    case STREAM_PHASE_AUTO_CFG_HEADER: {
       stream.regs.phase_auto_cfg_header = value;
+      // Per spec:
+      // Bits 0-11: PHASE_NUM_INCR - increment curr_phase by this amount
+      // Bits 12-23: CURR_PHASE_NUM_MSGS - number of messages to receive
+      // Bits 24-31: NEXT_PHASE_NUM_CFG_REG_WRITES - config blob size (stored as N-1)
+      uint32_t phase_num_incr = value & 0xFFF;
       stream.regs.num_msgs_to_receive = (value >> 12) & 0xFFF;
+      stream.regs.next_phase_num_cfg_reg_writes = (value >> 24) & 0xFF;
+
+      // Increment phase by PHASE_NUM_INCR
+      if (phase_num_incr > 0) {
+        stream.regs.curr_phase += phase_num_incr;
+      }
+      break;
+    }
+
+    case STREAM_CURR_PHASE:
+      // Per spec: base is added on write, subtracted on read
+      stream.regs.curr_phase = value + stream.regs.curr_phase_base;
       break;
 
     case STREAM_CURR_PHASE_BASE:
@@ -820,7 +1023,8 @@ void NocOverlay::write_reg(uint8_t stream_id, uint8_t reg_id, uint32_t value) {
 
     // Auto-config registers
     case STREAM_PHASE_AUTO_CFG_PTR:
-      stream.regs.phase_auto_cfg_ptr = value;
+      // Per spec: base is added on write, subtracted on read
+      stream.regs.phase_auto_cfg_ptr = value + stream.regs.phase_auto_cfg_ptr_base;
       break;
 
     case STREAM_PHASE_AUTO_CFG_PTR_BASE:
@@ -878,6 +1082,150 @@ void NocOverlay::write_reg(uint8_t stream_id, uint8_t reg_id, uint32_t value) {
     case STREAM_LOCAL_DEST:
       stream.regs.local_dest_stream_id = value & 0x3F;
       stream.regs.local_dest_msg_clear_num = (value >> 6) & 0xFFFF;
+      break;
+
+    // Receiver endpoint registers (streams 4-5 only)
+    case STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER:
+    case STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER + 1:
+    case STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER + 2:
+    case STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER + 3:
+      if (stream.caps.metadata_includes_header) {
+        stream.regs.receiver_endpoint_msg_header[reg_id - STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER] = value;
+        // Per spec: Writing all 4 header words triggers a header-only message
+        // The hardware copies the header to the next message in the metadata FIFO
+        if (reg_id == STREAM_RECEIVER_ENDPOINT_SET_MSG_HEADER + 3 &&
+            !stream.metadata_fifo.empty()) {
+          // Copy header to front of metadata FIFO
+          for (int i = 0; i < 4; ++i) {
+            stream.metadata_fifo.front().header[i] = stream.regs.receiver_endpoint_msg_header[i];
+          }
+        }
+      }
+      break;
+
+    case STREAM_RECEIVER_ENDPOINT_MSG_INFO:
+      // Write-only: Pop from metadata FIFO (like MSG_INFO_CLEAR but for receiver endpoint)
+      if (stream.caps.metadata_includes_header && !stream.metadata_fifo.empty()) {
+        stream.metadata_fifo.pop_front();
+      }
+      break;
+
+    // DRAM high address registers
+    case STREAM_REMOTE_DEST_BUF_START_HI:
+      stream.regs.remote_dest_buf_start_hi = value & 0xF;
+      break;
+
+    case STREAM_REMOTE_DEST_BUF_SIZE_HI:
+      stream.regs.remote_dest_buf_size_hi = value & 0xF;
+      break;
+
+    case STREAM_REMOTE_DEST_MSG_INFO_WR_PTR_HI:
+      stream.regs.remote_dest_msg_info_wr_ptr_hi = value & 0xF;
+      break;
+
+    // Scratch registers (DRAM streams only)
+    case STREAM_SCRATCH:
+    case STREAM_SCRATCH + 1:
+    case STREAM_SCRATCH + 2:
+    case STREAM_SCRATCH + 3:
+    case STREAM_SCRATCH + 4:
+    case STREAM_SCRATCH + 5:
+      if (stream.caps.can_transmit_dram) {
+        stream.regs.scratch[reg_id - STREAM_SCRATCH] = value;
+      }
+      break;
+
+    case STREAM_DEST_PHASE_READY_UPDATE:
+      // Per spec: Writing this register signals that the destination is ready
+      // for the specified phase (value contains the phase number)
+      // This is used for DRAM handshake where NCRISC coordinates phases
+      if (stream.caps.can_transmit_dram) {
+        // Signal phase ready - in simulation, just update handshake state
+        stream.handshake_response_received = true;
+        stream.remote_buf_space_available = stream.regs.remote_dest_buf_size;
+      }
+      break;
+
+    case STREAM_REMOTE_DEST_TRAFFIC_PRIORITY:
+      stream.regs.remote_dest_traffic_priority = value & 0xF;
+      break;
+
+    // Multicast flow control (32 destinations)
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 1:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 2:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 3:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 4:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 5:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 6:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 7:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 8:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 9:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 10:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 11:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 12:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 13:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 14:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 15:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 16:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 17:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 18:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 19:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 20:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 21:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 22:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 23:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 24:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 25:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 26:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 27:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 28:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 29:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 30:
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE + 31:
+      if (stream.caps.can_multicast) {
+        stream.regs.remote_dest_buf_space_available[reg_id - STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE] = value;
+      }
+      break;
+
+    case STREAM_REMOTE_DEST_BUF_SPACE_AVAILABLE_UPDATE: {
+      // Per spec: Updates remote buffer space for multicast destination
+      // Bits 0-4: destination index, Bits 5-31: space delta
+      if (stream.caps.can_multicast) {
+        uint8_t dest_idx = value & 0x1F;
+        int32_t delta = static_cast<int32_t>(value) >> 5;
+        if (dest_idx < 32) {
+          int64_t new_space = static_cast<int64_t>(stream.regs.remote_dest_buf_space_available[dest_idx]) + delta;
+          if (new_space < 0) new_space = 0;
+          stream.regs.remote_dest_buf_space_available[dest_idx] = static_cast<uint32_t>(new_space);
+        }
+      }
+      break;
+    }
+
+    // Debug status registers (read-only in hardware, but allow write for testing)
+    case STREAM_DEBUG_STATUS:
+      stream.regs.debug_status_0 = value;
+      break;
+
+    case STREAM_DEBUG_STATUS + 1:
+      stream.regs.debug_status_1 = value;
+      break;
+
+    case STREAM_DEBUG_STATUS + 2:
+      // Read-only, ignore writes
+      break;
+
+    // Message group compression/analysis
+    case STREAM_MSG_GROUP_COMPRESS:
+      stream.regs.msg_group_compress = value;
+      break;
+
+    case STREAM_MSG_GROUP_ZERO_MASK:
+    case STREAM_MSG_GROUP_ZERO_MASK + 1:
+    case STREAM_MSG_GROUP_ZERO_MASK + 2:
+    case STREAM_MSG_GROUP_ZERO_MASK + 3:
+      stream.regs.msg_group_zero_mask[reg_id - STREAM_MSG_GROUP_ZERO_MASK] = value;
       break;
 
     default:
@@ -1104,17 +1452,48 @@ bool NocOverlay::should_send_flow_control(unsigned stream_id) const {
     return false;
   }
 
-  // Send flow control when available space crosses threshold
+  // Calculate current available space
   uint32_t current_space = calculate_flow_control_threshold(stream_id);
-  uint32_t threshold = (1u << stream.regs.buf_space_ack_threshold) << 4;
 
+  // Per spec: 16 threshold modes based on buf_space_ack_threshold (0-15)
+  // The threshold determines when to send flow control update
+  uint32_t buf_size = stream.regs.buf_size;
+  uint32_t threshold;
+  uint8_t mode = stream.regs.buf_space_ack_threshold;
+
+  switch (mode) {
+    case 0:  threshold = 16; break;                    // 16 bytes (1 unit)
+    case 1:  threshold = 32; break;                    // 32 bytes (2 units)
+    case 2:  threshold = 64; break;                    // 64 bytes (4 units)
+    case 3:  threshold = 128; break;                   // 128 bytes (8 units)
+    case 4:  threshold = 256; break;                   // 256 bytes (16 units)
+    case 5:  threshold = 512; break;                   // 512 bytes (32 units)
+    case 6:  threshold = 1024; break;                  // 1KB (64 units)
+    case 7:  threshold = 2048; break;                  // 2KB (128 units)
+    case 8:  threshold = buf_size >> 7; break;         // buf_size / 128
+    case 9:  threshold = buf_size >> 6; break;         // buf_size / 64
+    case 10: threshold = buf_size >> 5; break;         // buf_size / 32
+    case 11: threshold = buf_size >> 4; break;         // buf_size / 16
+    case 12: threshold = buf_size >> 3; break;         // buf_size / 8
+    case 13: threshold = buf_size >> 2; break;         // buf_size / 4
+    case 14: threshold = buf_size >> 1; break;         // buf_size / 2
+    case 15: threshold = buf_size; break;              // Full buffer
+    default: threshold = 16; break;
+  }
+
+  // Ensure minimum threshold of 1 unit (16 bytes)
+  if (threshold == 0) {
+    threshold = 1;
+  }
+
+  // Send flow control when available space increases by at least threshold
   return (current_space >= stream.regs.last_ack_space_available + threshold);
 }
 
 uint32_t NocOverlay::calculate_flow_control_threshold(unsigned stream_id) const {
   const OverlayStream& stream = streams_[stream_id];
 
-  // Calculate available space in receive buffer
+  // Calculate available space in receive buffer (in 16-byte units)
   if (stream.regs.buf_size == 0) {
     return 0;
   }
