@@ -33,6 +33,7 @@ add_executable(noc_sim
   src/noc_router.cpp
   src/noc_mesh.cpp
   src/noc_niu.cpp
+  src/noc_overlay.cpp
   src/noc_translation.cpp
   src/riscv_core.cpp
   src/tensix_tile.cpp

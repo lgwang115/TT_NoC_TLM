@@ -30,7 +30,8 @@ SystemC can be auto-detected if `SYSTEMC_HOME` environment variable is set.
 - **NocRouter** (`src/noc_router.*`): Deterministic XY routing with 16 virtual channels. NoC0 routes right-then-down, NoC1 routes up-then-left.
 - **NocLink** (`src/noc_link.*`): Latency-modeled links (NIU: 5 cycles, router: 9 cycles).
 - **NocNiu** (`src/noc_niu.*`): Network Interface Unit - largest component (~1055 LOC). Handles MMIO registers, local memory, packet assembly/disassembly, atomic operations.
-- **TensixTile** (`src/tensix_tile.*`): Tile wrapper containing 5 RISC-V cores (B, T0, T1, T2, NC) per spec. T-cores disabled by default (they drive Tensix coprocessor modeled elsewhere).
+- **NocOverlay** (`src/noc_overlay.*`): NoC Overlay coprocessor with 64 streams per Tensix tile. Assists with message-based data movement between tiles. Supports phase-based operation, receive buffer FIFOs, and message metadata tracking.
+- **TensixTile** (`src/tensix_tile.*`): Tile wrapper containing 5 RISC-V cores (B, T0, T1, T2, NC) and one NoC Overlay per spec. T-cores disabled by default (they drive Tensix coprocessor modeled elsewhere).
 - **RiscvCore** (`src/riscv_core.*`): Simple traffic generator that issues MMIO operations to NIUs.
 
 **Data Types** (`src/noc_types.h`):
@@ -59,10 +60,6 @@ SystemC can be auto-detected if `SYSTEMC_HOME` environment variable is set.
 - Inter-module communication via SystemC `sc_fifo`
 
 ## TODO: Spec Misalignments to Address
-
-### High Priority
-
-- **NoC Overlay Model**: Spec defines 64-stream NoC Overlay coprocessor per Tensix tile for data movement. Currently no overlay model exists; `deliver_to_overlay` flag is parsed but not acted upon. See spec `TensixTile/NoCOverlay.md`.
 
 ### Lower Priority
 

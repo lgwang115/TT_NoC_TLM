@@ -4,6 +4,7 @@
 #include <systemc>
 
 #include "noc_niu.h"
+#include "noc_overlay.h"
 #include "riscv_core.h"
 
 SC_MODULE(TensixTile) {
@@ -35,6 +36,9 @@ SC_MODULE(TensixTile) {
  private:
   NocNiu niu0_;
   NocNiu niu1_;
+
+  // NoC Overlay coprocessor with 64 streams per spec
+  NocOverlay overlay_;
 
   // 5 Baby RISC-V cores per spec:
   // - B (Brisc): General control, core_id=0
@@ -75,6 +79,15 @@ SC_MODULE(TensixTile) {
   void t_cores_mux_thread();
   sc_core::sc_fifo<NiuMmioReq> mmio_req_mux_fifo_;
   sc_core::sc_fifo<NiuMmioResp> mmio_resp_mux_fifo_;
+
+  // FIFOs for overlay communication with NIUs
+  sc_core::sc_fifo<OverlayNiuReq> overlay_niu_req_fifo_;
+  sc_core::sc_fifo<OverlayNiuResp> overlay_niu_resp_fifo_;
+  sc_core::sc_fifo<NocFlit> overlay_in_fifo_;
+  sc_core::sc_fifo<NocFlit> overlay_out_fifo_;
+
+  // Thread to route overlay packets between NIU and overlay
+  void overlay_router_thread();
 };
 
 #endif

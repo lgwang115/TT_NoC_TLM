@@ -99,6 +99,10 @@ SC_MODULE(NocNiu) {
   void rx_loop();
   void mmio_loop();
 
+  // Public access to L1 memory for overlay coprocessor
+  std::vector<uint8_t>& get_l1_memory() { return mem_; }
+  const std::vector<uint8_t>& get_l1_memory() const { return mem_; }
+
  private:
   struct AssembledPacket {
     NocPacket packet;

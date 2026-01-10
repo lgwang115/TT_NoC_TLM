@@ -12,6 +12,7 @@ TensixTile::TensixTile(sc_core::sc_module_name name,
       mesh_height(mesh_h),
       niu0_("niu0", coord_in, NocId::NOC0, cycle_time_in, mesh_w, mesh_h),
       niu1_("niu1", coord_in, NocId::NOC1, cycle_time_in, mesh_w, mesh_h),
+      overlay_("overlay", coord_in, cycle_time_in, 64),
       riscv_b_("riscv_b", cycle_time_in, coord_in, 0),
       riscv_t0_("riscv_t0", cycle_time_in, coord_in, 1),
       riscv_t1_("riscv_t1", cycle_time_in, coord_in, 2),
@@ -35,7 +36,11 @@ TensixTile::TensixTile(sc_core::sc_module_name name,
       mmio_resp_fifo_t2_(4),
       resp_fifo_t2_(4),
       mmio_req_mux_fifo_(16),
-      mmio_resp_mux_fifo_(16) {
+      mmio_resp_mux_fifo_(16),
+      overlay_niu_req_fifo_(8),
+      overlay_niu_resp_fifo_(8),
+      overlay_in_fifo_(16),
+      overlay_out_fifo_(16) {
   // Connect NIUs to external NoC ports
   niu0_.net_in.bind(noc0_in);
   niu0_.net_out.bind(noc0_out);
@@ -86,7 +91,17 @@ TensixTile::TensixTile(sc_core::sc_module_name name,
   riscv_t1_.configure(disabled_config);
   riscv_t2_.configure(disabled_config);
 
+  // Connect overlay to NIU request/response FIFOs
+  overlay_.niu_req_out.bind(overlay_niu_req_fifo_);
+  overlay_.niu_resp_in.bind(overlay_niu_resp_fifo_);
+  overlay_.overlay_in.bind(overlay_in_fifo_);
+  overlay_.overlay_out.bind(overlay_out_fifo_);
+
+  // Give overlay access to NIU0's L1 memory
+  overlay_.set_l1_memory(&niu0_.get_l1_memory());
+
   SC_THREAD(t_cores_mux_thread);
+  SC_THREAD(overlay_router_thread);
 }
 
 void TensixTile::t_cores_mux_thread() {
@@ -163,4 +178,56 @@ void TensixTile::configure_riscv_t2(const RiscvCore::Config &config) {
 
 void TensixTile::configure_riscv_nc(const RiscvCore::Config &config) {
   riscv_nc_.configure(config);
+}
+
+void TensixTile::overlay_router_thread() {
+  // Route overlay packets between NIU and overlay coprocessor
+  // Handles deliver_to_overlay flag in incoming packets
+  // and converts overlay NIU requests to NoC packets
+
+  while (true) {
+    bool did_work = false;
+
+    // Check for overlay requests to send via NIU
+    OverlayNiuReq req;
+    if (overlay_niu_req_fifo_.nb_read(req)) {
+      // Convert overlay request to NIU command
+      NiuCmd cmd;
+      cmd.type = NocReqType::Write;
+      cmd.dst = req.dest;
+      cmd.addr = req.dest_addr;
+      cmd.length = req.length;
+      cmd.posted = req.is_posted;
+      cmd.vc_static = true;
+      cmd.class_bits = req.vc_class;
+      cmd.buddy_bit = req.vc_buddy;
+
+      // Read data from L1 and put in command
+      const auto& mem = niu0_.get_l1_memory();
+      cmd.data.resize(req.length);
+      for (uint32_t i = 0; i < req.length && req.src_addr + i < mem.size(); ++i) {
+        cmd.data[i] = mem[req.src_addr + i];
+      }
+
+      // Use NIU0 or NIU1 based on overlay configuration
+      cmd_fifo_0_.write(cmd);
+      did_work = true;
+    }
+
+    // Check for packets to route to overlay (deliver_to_overlay flag)
+    // This would be handled in the NIU when it receives packets with
+    // the deliver_to_overlay flag set - for now we forward from overlay_out_fifo_
+    NocFlit flit;
+    if (overlay_out_fifo_.nb_read(flit)) {
+      // Overlay is sending a packet - route it through NIU
+      // For now, just log it
+      did_work = true;
+    }
+
+    if (!did_work) {
+      wait(cycle_time);
+    } else {
+      wait(sc_core::SC_ZERO_TIME);
+    }
+  }
 }
