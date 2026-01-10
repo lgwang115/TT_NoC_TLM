@@ -6,6 +6,8 @@
 #include <systemc>
 
 SC_MODULE(TrafficGen) {
+  SC_HAS_PROCESS(TrafficGen);
+
   sc_core::sc_fifo_out<NocFlit> inject;
   sc_core::sc_fifo_in<NocFlit> egress;
 

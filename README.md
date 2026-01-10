@@ -9,7 +9,7 @@ This folder contains a simple, transaction-level SystemC model for the WormholeB
 - VC id is 4 bits: dateline, class, buddy; dateline flips on torus wrap hops
 - Ordering support: VC_STATIC disables buddy adaptation; VC_LINKED reuses the same initial VC id and preserves buddy flips per router for a linked group
 - Coordinate translation (default table) can be enabled per packet before injection
-- Broadcast modeled as source replication over unicasts
+- Broadcast modeled with router-level multicast routing (via compute_out_mask)
 - NIU model with command interface and local memory (read/write/atomic add)
 - NIU MMIO register model for request initiators (partial `MemoryMap.md`)
 - NIU counters and full MMIO address map coverage with debug stubs

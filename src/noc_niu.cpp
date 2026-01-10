@@ -1,6 +1,7 @@
 #include "noc_niu.h"
 
 #include <algorithm>
+#include <iostream>
 
 namespace {
 constexpr uint32_t kNocCmdBufOffset = 0x400;
@@ -91,17 +92,216 @@ AtomicDecoded decode_atomic(uint32_t raw) {
   out.zaamo_op = static_cast<uint8_t>((raw >> 8) & 0x7u);
   return out;
 }
+
+// ============================================================================
+// Address Alignment Validation per Spec
+// ============================================================================
+
+// Memory region types for alignment validation
+enum class MemRegion {
+  L1,      // L1 scratchpad (0x00000000 - 0x0016FFFF)
+  MMIO,    // MMIO registers (0xFFB00000+)
+  DRAM,    // External DRAM
+  PCIe,    // Host PCIe
+  Other    // Other memory types
+};
+
+// Determine memory region from address
+MemRegion get_mem_region(uint64_t addr) {
+  // L1 scratchpad: 0x00000000 - 0x0016FFFF (1464 KiB)
+  if (addr < 0x00170000) {
+    return MemRegion::L1;
+  }
+  // MMIO region: 0xFFB00000+
+  if (addr >= 0xFFB00000) {
+    return MemRegion::MMIO;
+  }
+  // For simplicity, treat other addresses as "Other"
+  // In a full implementation, would check for DRAM/PCIe based on coordinates
+  return MemRegion::Other;
+}
+
+// Check if address is aligned to given boundary
+bool is_aligned(uint64_t addr, uint32_t alignment) {
+  return (addr % alignment) == 0;
+}
+
+// Check if two addresses are congruent mod N (same offset within alignment)
+bool is_congruent(uint64_t addr1, uint64_t addr2, uint32_t mod) {
+  return (addr1 % mod) == (addr2 % mod);
+}
+
+// Alignment validation result
+struct AlignmentResult {
+  bool valid = true;
+  const char* error_msg = nullptr;
+};
+
+// Validate alignment for length-based transfers (not byte-enable)
+// Per spec alignment table
+AlignmentResult validate_length_transfer(uint64_t src_addr, uint64_t dst_addr,
+                                          uint32_t length, MemRegion src_type,
+                                          MemRegion dst_type) {
+  AlignmentResult result;
+
+  // L1 -> L1: Addresses must be congruent mod 16
+  if (src_type == MemRegion::L1 && dst_type == MemRegion::L1) {
+    if (!is_congruent(src_addr, dst_addr, 16)) {
+      result.valid = false;
+      result.error_msg = "L1->L1: addresses not congruent mod 16";
+    }
+    return result;
+  }
+
+  // L1 -> MMIO: Dest must be 4-byte aligned, congruent mod 16
+  if (src_type == MemRegion::L1 && dst_type == MemRegion::MMIO) {
+    if (!is_aligned(dst_addr, 4)) {
+      result.valid = false;
+      result.error_msg = "L1->MMIO: dest not 4-byte aligned";
+    } else if (!is_congruent(src_addr, dst_addr, 16)) {
+      result.valid = false;
+      result.error_msg = "L1->MMIO: addresses not congruent mod 16";
+    }
+    return result;
+  }
+
+  // MMIO -> L1: Length <= 4 - (addr % 4), congruent mod 4
+  if (src_type == MemRegion::MMIO && dst_type == MemRegion::L1) {
+    uint32_t max_len = 4 - (src_addr % 4);
+    if (length > max_len) {
+      result.valid = false;
+      result.error_msg = "MMIO->L1: length exceeds alignment boundary";
+    } else if (!is_congruent(src_addr, dst_addr, 4)) {
+      result.valid = false;
+      result.error_msg = "MMIO->L1: addresses not congruent mod 4";
+    }
+    return result;
+  }
+
+  // MMIO -> MMIO: Must be 4-byte aligned
+  if (src_type == MemRegion::MMIO && dst_type == MemRegion::MMIO) {
+    if (!is_aligned(src_addr, 4) || !is_aligned(dst_addr, 4)) {
+      result.valid = false;
+      result.error_msg = "MMIO->MMIO: addresses not 4-byte aligned";
+    }
+    return result;
+  }
+
+  // L1 -> Other (DRAM): Congruent mod 32
+  if (src_type == MemRegion::L1 && dst_type == MemRegion::Other) {
+    if (!is_congruent(src_addr, dst_addr, 32)) {
+      result.valid = false;
+      result.error_msg = "L1->Other: addresses not congruent mod 32";
+    }
+    return result;
+  }
+
+  // Other -> L1: Congruent mod 32
+  if (src_type == MemRegion::Other && dst_type == MemRegion::L1) {
+    if (!is_congruent(src_addr, dst_addr, 32)) {
+      result.valid = false;
+      result.error_msg = "Other->L1: addresses not congruent mod 32";
+    }
+    return result;
+  }
+
+  return result;  // Default: valid
+}
+
+// Validate alignment for byte-enable transfers
+AlignmentResult validate_byte_enable_transfer(uint64_t src_addr, uint64_t dst_addr,
+                                               bool is_inline, MemRegion src_type,
+                                               MemRegion dst_type) {
+  AlignmentResult result;
+
+  // Inline -> L1: Dest must be 16-byte aligned
+  if (is_inline && dst_type == MemRegion::L1) {
+    if (!is_aligned(dst_addr, 16)) {
+      result.valid = false;
+      result.error_msg = "Inline->L1: dest not 16-byte aligned";
+    }
+    return result;
+  }
+
+  // Inline -> MMIO: Dest must be 4-byte aligned
+  if (is_inline && dst_type == MemRegion::MMIO) {
+    if (!is_aligned(dst_addr, 4)) {
+      result.valid = false;
+      result.error_msg = "Inline->MMIO: dest not 4-byte aligned";
+    }
+    return result;
+  }
+
+  // L1 -> L1 (byte-enable): Both must be 32-byte aligned
+  if (src_type == MemRegion::L1 && dst_type == MemRegion::L1) {
+    if (!is_aligned(dst_addr, 32) || !is_aligned(src_addr, 32)) {
+      result.valid = false;
+      result.error_msg = "L1->L1 (BE): addresses not 32-byte aligned";
+    }
+    return result;
+  }
+
+  // L1 -> MMIO (byte-enable): Dest 4-byte, congruent mod 16
+  if (src_type == MemRegion::L1 && dst_type == MemRegion::MMIO) {
+    if (!is_aligned(dst_addr, 4)) {
+      result.valid = false;
+      result.error_msg = "L1->MMIO (BE): dest not 4-byte aligned";
+    } else if (!is_congruent(src_addr, dst_addr, 16)) {
+      result.valid = false;
+      result.error_msg = "L1->MMIO (BE): addresses not congruent mod 16";
+    }
+    return result;
+  }
+
+  // MMIO -> L1 (byte-enable): Dest 32-byte, src 4-byte aligned
+  if (src_type == MemRegion::MMIO && dst_type == MemRegion::L1) {
+    if (!is_aligned(dst_addr, 32)) {
+      result.valid = false;
+      result.error_msg = "MMIO->L1 (BE): dest not 32-byte aligned";
+    } else if (!is_aligned(src_addr, 4)) {
+      result.valid = false;
+      result.error_msg = "MMIO->L1 (BE): src not 4-byte aligned";
+    }
+    return result;
+  }
+
+  // MMIO -> MMIO (byte-enable): Both 4-byte aligned
+  if (src_type == MemRegion::MMIO && dst_type == MemRegion::MMIO) {
+    if (!is_aligned(src_addr, 4) || !is_aligned(dst_addr, 4)) {
+      result.valid = false;
+      result.error_msg = "MMIO->MMIO (BE): addresses not 4-byte aligned";
+    }
+    return result;
+  }
+
+  return result;  // Default: valid
+}
+
+// Validate atomic operation alignment (must be 4-byte aligned for 32-bit atomics)
+AlignmentResult validate_atomic_alignment(uint64_t addr) {
+  AlignmentResult result;
+  if (!is_aligned(addr, 4)) {
+    result.valid = false;
+    result.error_msg = "Atomic: address not 4-byte aligned";
+  }
+  return result;
+}
+
 }  // namespace
 
 NocNiu::NocNiu(sc_core::sc_module_name name,
                NocCoord coord_in,
                NocId noc_id_in,
                sc_core::sc_time cycle,
+               unsigned mesh_w,
+               unsigned mesh_h,
                size_t mem_size_bytes)
     : sc_module(name),
       coord(coord_in),
       noc_id(noc_id_in),
       cycle_time(cycle),
+      mesh_width(mesh_w),
+      mesh_height(mesh_h),
       mem_(mem_size_bytes, 0),
       translation_(default_translation(noc_id_in)) {
   noc_id_logical_ = static_cast<uint32_t>((coord.y & 0x3Fu) << 6) |
@@ -227,7 +427,7 @@ void NocNiu::rx_loop() {
         } else if (entry.packet.req_type == NocReqType::Write) {
           inc_counter(kCounterMstWrAck);
           dec_counter(kCounterMstReqsOutstandingBase + entry.packet.transaction_id);
-        } else if (entry.packet.req_type == NocReqType::AtomicAdd) {
+        } else if (entry.packet.req_type == NocReqType::Atomic) {
           inc_counter(kCounterMstAtomicResp);
           dec_counter(kCounterMstReqsOutstandingBase + entry.packet.transaction_id);
         }
@@ -267,6 +467,10 @@ void NocNiu::inc_counter(size_t idx, uint32_t value) {
     return;
   }
   counters_[idx] += value;
+  // Per spec: counters 16-47 are 8-bit, so mask to 8 bits
+  if (idx >= kCounterMstReqsOutstandingBase && idx < kCounterSlvAtomicRespSent) {
+    counters_[idx] &= 0xFFu;
+  }
 }
 
 void NocNiu::dec_counter(size_t idx, uint32_t value) {
@@ -274,6 +478,10 @@ void NocNiu::dec_counter(size_t idx, uint32_t value) {
     return;
   }
   counters_[idx] -= value;
+  // Per spec: counters 16-47 are 8-bit, so mask to 8 bits
+  if (idx >= kCounterMstReqsOutstandingBase && idx < kCounterSlvAtomicRespSent) {
+    counters_[idx] &= 0xFFu;
+  }
 }
 
 uint32_t NocNiu::mmio_read(uint32_t addr) {
@@ -307,15 +515,23 @@ uint32_t NocNiu::mmio_read(uint32_t addr) {
   };
 
   auto read_ident = [&]() -> uint32_t {
-    uint32_t width = 10;
-    uint32_t height = 12;
-    uint32_t dateline_x = (noc_id == NocId::NOC0) ? 1u : 0u;
-    uint32_t dateline_y = (noc_id == NocId::NOC0) ? 1u : 0u;
+    // Per spec: dateline flip indicates whether this node is at the dateline position
+    // For NOC0: dateline at x=width-1 (East wrap) and y=height-1 (South wrap)
+    // For NOC1: dateline at x=0 (West wrap) and y=0 (North wrap)
+    uint32_t dateline_x = 0;
+    uint32_t dateline_y = 0;
+    if (noc_id == NocId::NOC0) {
+      dateline_x = (mesh_width > 1 && coord.x == mesh_width - 1) ? 1u : 0u;
+      dateline_y = (mesh_height > 1 && coord.y == mesh_height - 1) ? 1u : 0u;
+    } else {
+      dateline_x = (mesh_width > 1 && coord.x == 0) ? 1u : 0u;
+      dateline_y = (mesh_height > 1 && coord.y == 0) ? 1u : 0u;
+    }
     uint32_t x_first = (noc_id == NocId::NOC0) ? 1u : 0u;
     return (coord.x & 0x3Fu) |
            ((coord.y & 0x3Fu) << 6) |
-           ((width & 0x7Fu) << 12) |
-           ((height & 0x7Fu) << 19) |
+           ((mesh_width & 0x7Fu) << 12) |
+           ((mesh_height & 0x7Fu) << 19) |
            ((dateline_x & 0x1u) << 26) |
            ((dateline_y & 0x1u) << 27) |
            ((x_first & 0x1u) << 28);
@@ -545,7 +761,8 @@ void NocNiu::issue_from_initiator(size_t idx) {
   bool wr_be = (regs.ctrl >> 2) & 0x1u;
   bool path_reserve = (regs.ctrl >> 8) & 0x1u;
   bool mem_rd_drop_ack = (regs.ctrl >> 9) & 0x1u;
-  uint8_t arb_priority = static_cast<uint8_t>((regs.ctrl >> 27) & 0xFu);
+  // ARB_PRIORITY is bits 31:27 per spec (5 bits, values 0-31)
+  uint8_t arb_priority = static_cast<uint8_t>((regs.ctrl >> 27) & 0x1Fu);
 
   uint8_t class_bits = 0;
   uint8_t buddy_bit = 0;
@@ -560,7 +777,7 @@ void NocNiu::issue_from_initiator(size_t idx) {
       req_type = NocReqType::Read;
       break;
     case 1:
-      req_type = NocReqType::AtomicAdd;
+      req_type = NocReqType::Atomic;
       break;
     case 2:
       req_type = NocReqType::Write;
@@ -654,6 +871,15 @@ void NocNiu::issue_from_initiator(size_t idx) {
 
   uint32_t total_length = regs.at_len_be;
   uint32_t max_payload = 8192;
+
+  // Validate address alignment before issuing request
+  bool is_atomic = (req_type == NocReqType::Atomic);
+  bool is_byte_enable_req = (req_type == NocReqType::Write) && (wr_be || wr_inline);
+  if (!validate_request_alignment(ret_addr, targ_addr, total_length,
+                                   is_byte_enable_req, wr_inline, is_atomic)) {
+    // Log error but continue (in real hardware this would cause undefined behavior)
+    std::cerr << "  Request will proceed but may produce incorrect results" << std::endl;
+  }
 
   auto send_read_chunk = [&](uint64_t addr, uint64_t ret, uint32_t len) {
     NocPacket copy = pkt;
@@ -765,55 +991,8 @@ void NocNiu::issue_from_initiator(size_t idx) {
     if (path_reserve) {
       wait(cycle_time * 10);
     }
-    unsigned max_x = 10;
-    unsigned max_y = 12;
-    std::vector<unsigned> xs;
-    std::vector<unsigned> ys;
-    if (brcst_start.x <= brcst_end.x) {
-      for (unsigned x = brcst_start.x; x <= brcst_end.x && x < max_x; ++x) {
-        xs.push_back(x);
-      }
-    } else {
-      for (unsigned x = 0; x <= brcst_end.x && x < max_x; ++x) {
-        xs.push_back(x);
-      }
-      for (unsigned x = brcst_start.x; x < max_x; ++x) {
-        xs.push_back(x);
-      }
-    }
-    if (brcst_start.y <= brcst_end.y) {
-      for (unsigned y = brcst_start.y; y <= brcst_end.y && y < max_y; ++y) {
-        ys.push_back(y);
-      }
-    } else {
-      for (unsigned y = 0; y <= brcst_end.y && y < max_y; ++y) {
-        ys.push_back(y);
-      }
-      for (unsigned y = brcst_start.y; y < max_y; ++y) {
-        ys.push_back(y);
-      }
-    }
-
-    auto emit = [&](unsigned x, unsigned y) {
-      if (!brcst_src_include && x == coord.x && y == coord.y) {
-        return;
-      }
-      bool opt_out = false;
-      if (x < 10 && (router_cfg_1_ & (1u << x))) {
-        opt_out = true;
-      }
-      if (y < 12 && (router_cfg_3_ & (1u << y))) {
-        opt_out = true;
-      }
-      if (opt_out) {
-        return;
-      }
-      NocPacket copy = pkt;
-      copy.dst = NocCoord{x, y};
-      send_packet(copy);
-    };
-    (void)emit;
-
+    // Broadcast is sent as a single packet with is_broadcast=true.
+    // The router handles multicast routing via compute_out_mask().
     NocPacket copy = pkt;
     copy.brcst_start = brcst_start;
     copy.brcst_end = brcst_end;
@@ -944,7 +1123,7 @@ void NocNiu::handle_request(const NocPacket &packet) {
     return;
   }
 
-  if (packet.req_type == NocReqType::AtomicAdd) {
+  if (packet.req_type == NocReqType::Atomic) {
     if (packet.posted) {
       inc_counter(kCounterSlvPostedAtomicReceived);
     } else {
@@ -1020,7 +1199,7 @@ void NocNiu::send_response(const NocPacket &request, const std::vector<uint8_t> 
   resp.payload = payload;
   resp.length = static_cast<uint32_t>(payload.size());
   resp.addr = request.ret_addr;
-  if (request.req_type == NocReqType::AtomicAdd) {
+  if (request.req_type == NocReqType::Atomic) {
     resp.force_single_flit = true;
   }
   resp.transaction_id = request.transaction_id;
@@ -1052,4 +1231,32 @@ void NocNiu::store_u32(uint64_t addr, uint32_t value) {
   mem_[addr + 1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
   mem_[addr + 2] = static_cast<uint8_t>((value >> 16) & 0xFFu);
   mem_[addr + 3] = static_cast<uint8_t>((value >> 24) & 0xFFu);
+}
+
+bool NocNiu::validate_request_alignment(uint64_t src_addr, uint64_t dst_addr,
+                                        uint32_t length, bool is_byte_enable,
+                                        bool is_inline, bool is_atomic) {
+  // Determine memory regions
+  MemRegion src_type = get_mem_region(src_addr);
+  MemRegion dst_type = get_mem_region(dst_addr);
+
+  AlignmentResult result;
+
+  if (is_atomic) {
+    result = validate_atomic_alignment(dst_addr);
+  } else if (is_byte_enable) {
+    result = validate_byte_enable_transfer(src_addr, dst_addr, is_inline, src_type, dst_type);
+  } else {
+    result = validate_length_transfer(src_addr, dst_addr, length, src_type, dst_type);
+  }
+
+  if (!result.valid) {
+    std::cerr << sc_core::sc_time_stamp() << " NIU " << coord_to_string(coord)
+              << " ALIGNMENT ERROR: " << result.error_msg
+              << " src=0x" << std::hex << src_addr
+              << " dst=0x" << dst_addr << std::dec
+              << " len=" << length << std::endl;
+  }
+
+  return result.valid;
 }

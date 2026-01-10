@@ -21,10 +21,12 @@ enum class NocId {
   NOC1,
 };
 
+// Request type encoding matches NOC_CTRL bits 1:0 per spec
 enum class NocReqType : uint8_t {
-  Read = 0,
-  Write = 1,
-  AtomicAdd = 2,
+  Read = 0,      // 0b00
+  Atomic = 1,    // 0b01
+  Write = 2,     // 0b10
+  // 0b11 is reserved
 };
 
 struct NocPacket {

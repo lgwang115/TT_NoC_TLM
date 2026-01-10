@@ -6,6 +6,8 @@
 #include "noc_niu.h"
 
 SC_MODULE(RiscvCore) {
+  SC_HAS_PROCESS(RiscvCore);
+
   struct Config {
     bool enabled = true;
     unsigned mesh_width = 10;

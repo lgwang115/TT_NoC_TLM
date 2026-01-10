@@ -20,6 +20,8 @@ enum class NocPort {
 inline constexpr size_t kNocPortCount = static_cast<size_t>(NocPort::Count);
 
 SC_MODULE(NocRouter) {
+  SC_HAS_PROCESS(NocRouter);
+
   std::array<sc_core::sc_fifo_in<NocFlit>, kNocPortCount> in;
   std::array<sc_core::sc_fifo_out<NocFlit>, kNocPortCount> out;
 

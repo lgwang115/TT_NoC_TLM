@@ -14,8 +14,8 @@ int sc_main(int argc, char *argv[]) {
   NocMesh mesh0("mesh0", width, height, NocId::NOC0, cycle_time);
   NocMesh mesh1("mesh1", width, height, NocId::NOC1, cycle_time);
 
-  TensixTile tile00("tile00", NocCoord{0, 0}, cycle_time);
-  TensixTile tile32("tile32", NocCoord{3, 2}, cycle_time);
+  TensixTile tile00("tile00", NocCoord{0, 0}, cycle_time, width, height);
+  TensixTile tile32("tile32", NocCoord{3, 2}, cycle_time, width, height);
 
   tile00.noc0_out.bind(mesh0.local_in(0, 0));
   tile00.noc0_in.bind(mesh0.local_out(0, 0));

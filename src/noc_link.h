@@ -12,6 +12,8 @@ struct TimedFlit {
 };
 
 SC_MODULE(NocLink) {
+  SC_HAS_PROCESS(NocLink);
+
   sc_core::sc_fifo_in<NocFlit> in;
   sc_core::sc_fifo_out<NocFlit> out;
 

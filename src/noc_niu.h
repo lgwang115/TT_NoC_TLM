@@ -68,6 +68,8 @@ inline std::ostream &operator<<(std::ostream &os, const NiuMmioResp &resp) {
 }
 
 SC_MODULE(NocNiu) {
+  SC_HAS_PROCESS(NocNiu);
+
   sc_core::sc_fifo_in<NocFlit> net_in;
   sc_core::sc_fifo_out<NocFlit> net_out;
 
@@ -79,12 +81,19 @@ SC_MODULE(NocNiu) {
   NocCoord coord;
   NocId noc_id;
   sc_core::sc_time cycle_time;
+  unsigned mesh_width;
+  unsigned mesh_height;
+
+  // Default L1 size per spec: 1464 KiB = 16 banks × 91.5 KiB
+  static constexpr size_t kDefaultL1Size = 1464 * 1024;  // 1,499,136 bytes
 
   explicit NocNiu(sc_core::sc_module_name name,
                   NocCoord coord,
                   NocId noc_id,
                   sc_core::sc_time cycle_time,
-                  size_t mem_size_bytes = 65536);
+                  unsigned mesh_width = 10,
+                  unsigned mesh_height = 12,
+                  size_t mem_size_bytes = kDefaultL1Size);
 
   void cmd_loop();
   void rx_loop();
@@ -138,6 +147,9 @@ SC_MODULE(NocNiu) {
   void issue_from_initiator(size_t idx);
   void inc_counter(size_t idx, uint32_t value = 1);
   void dec_counter(size_t idx, uint32_t value = 1);
+  bool validate_request_alignment(uint64_t src_addr, uint64_t dst_addr,
+                                  uint32_t length, bool is_byte_enable,
+                                  bool is_inline, bool is_atomic);
 };
 
 #endif
