@@ -10,6 +10,7 @@
 
 #include "noc_types.h"
 #include "noc_translation.h"
+#include "noc_l1_if.h"
 #include <systemc>
 
 struct NiuCmd {
@@ -72,6 +73,8 @@ SC_MODULE(NocNiu) {
 
   sc_core::sc_fifo_in<NocFlit> net_in;
   sc_core::sc_fifo_out<NocFlit> net_out;
+  sc_core::sc_port<sc_core::sc_fifo_out_if<NocFlit>, 1,
+                   sc_core::SC_ZERO_OR_MORE_BOUND> overlay_out;
 
   sc_core::sc_fifo_in<NiuCmd> cmd_in;
   sc_core::sc_fifo_out<NiuResp> resp_out;
@@ -98,10 +101,15 @@ SC_MODULE(NocNiu) {
   void cmd_loop();
   void rx_loop();
   void mmio_loop();
+  void mmio_issue_loop();
+  uint32_t mmio_read_reg(uint32_t addr) { return mmio_read(addr); }
+  void mmio_write_reg(uint32_t addr, uint32_t data) { mmio_write(addr, data); }
 
   // Public access to L1 memory for overlay coprocessor
   std::vector<uint8_t>& get_l1_memory() { return mem_; }
   const std::vector<uint8_t>& get_l1_memory() const { return mem_; }
+  void set_l1_memory_iface(NocL1MemoryIf* iface) { l1_mem_if_ = iface; }
+  size_t l1_size() const;
 
  private:
   struct AssembledPacket {
@@ -123,12 +131,15 @@ SC_MODULE(NocNiu) {
   };
 
   std::vector<uint8_t> mem_;
+  NocL1MemoryIf* l1_mem_if_ = nullptr;
   uint64_t next_packet_id_ = 1;
   std::unordered_map<uint64_t, AssembledPacket> inflight_;
   std::unordered_map<uint64_t, uint8_t> linked_vc_map_;
   NocTranslationTable translation_;
   std::array<InitiatorRegs, 4> initiators_ = {};
   std::deque<NiuCmd> pending_cmds_;
+  std::deque<size_t> pending_mmio_issues_;
+  sc_core::sc_event mmio_issue_event_;
   uint32_t niu_cfg_0_ = 0;
   uint32_t router_cfg_0_ = 0;
   uint32_t router_cfg_1_ = 0;
@@ -146,6 +157,8 @@ SC_MODULE(NocNiu) {
   void send_response(const NocPacket &request, const std::vector<uint8_t> &payload);
   uint32_t load_u32(uint64_t addr) const;
   void store_u32(uint64_t addr, uint32_t value);
+  void l1_read(uint64_t addr, uint8_t* dst, size_t len) const;
+  void l1_write(uint64_t addr, const uint8_t* src, size_t len);
   uint32_t mmio_read(uint32_t addr);
   void mmio_write(uint32_t addr, uint32_t data);
   void issue_from_initiator(size_t idx);

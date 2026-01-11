@@ -1,5 +1,6 @@
 #include "noc_overlay.h"
 
+#include <algorithm>
 #include <iostream>
 
 // ============================================================================
@@ -167,11 +168,12 @@ void NocOverlay::process_stream(unsigned stream_id) {
       // header array, hardware should promptly advance MSG_INFO_PTR
       if (stream.metadata_fifo.size() < stream.caps.metadata_fifo_capacity &&
           stream.regs.msg_info_ptr < stream.regs.msg_info_wr_ptr &&
-          l1_mem_ != nullptr) {
+          (l1_mem_if_ != nullptr || l1_mem_ != nullptr)) {
         // Read message info from L1 message header array
         uint64_t hdr_addr = stream.regs.msg_info_ptr << 4;
-        uint32_t msg_length = extract_msg_length(
-            l1_mem_->data() + std::min(hdr_addr, static_cast<uint64_t>(l1_mem_->size() - 16)));
+        uint8_t header_bytes[16] = {};
+        l1_read_block(hdr_addr, header_bytes, sizeof(header_bytes));
+        uint32_t msg_length = extract_msg_length(header_bytes);
 
         // Calculate buffer pointer based on current read position
         uint32_t buf_ptr = stream.regs.rd_ptr;
@@ -297,7 +299,7 @@ void NocOverlay::rx_thread() {
         if (stream.state == OverlayStreamState::Running && stream.regs.remote_source) {
           // This is a data packet for this stream
           // Write to receive buffer in L1
-          if (l1_mem_ != nullptr) {
+          if (l1_mem_if_ != nullptr || l1_mem_ != nullptr) {
             uint64_t buf_addr = (stream.regs.buf_start + stream.regs.wr_ptr) << 4;
             size_t bytes_to_write = std::min(static_cast<size_t>(32), flit.data.size());
             l1_write_block(buf_addr, flit.data.data(), bytes_to_write);
@@ -399,7 +401,8 @@ void NocOverlay::push_msg_to_metadata_fifo(unsigned stream_id, uint32_t buf_ptr,
   meta.msg_length = length;
 
   // If this stream includes header copies, read header from L1
-  if (stream.caps.metadata_includes_header && l1_mem_ != nullptr) {
+  if (stream.caps.metadata_includes_header &&
+      (l1_mem_if_ != nullptr || l1_mem_ != nullptr)) {
     uint64_t hdr_addr = (stream.regs.buf_start + buf_ptr) << 4;
     for (int i = 0; i < 4; ++i) {
       meta.header[i] = l1_read_u32(hdr_addr + i * 4);
@@ -422,42 +425,67 @@ bool NocOverlay::pop_msg_from_metadata_fifo(unsigned stream_id, OverlayMsgMetada
 }
 
 uint32_t NocOverlay::l1_read_u32(uint64_t addr) const {
-  if (l1_mem_ == nullptr || addr + 4 > l1_mem_->size()) {
+  size_t l1_size = l1_mem_if_ ? l1_mem_if_->size()
+                              : (l1_mem_ ? l1_mem_->size() : 0);
+  if ((l1_mem_if_ == nullptr && l1_mem_ == nullptr) || addr + 4 > l1_size) {
     return 0;
   }
+  uint8_t buf[4] = {0, 0, 0, 0};
+  if (l1_mem_if_) {
+    l1_mem_if_->read(addr, buf, sizeof(buf));
+  } else {
+    std::copy(l1_mem_->begin() + addr, l1_mem_->begin() + addr + 4, buf);
+  }
   uint32_t value = 0;
-  value |= (*l1_mem_)[addr];
-  value |= static_cast<uint32_t>((*l1_mem_)[addr + 1]) << 8;
-  value |= static_cast<uint32_t>((*l1_mem_)[addr + 2]) << 16;
-  value |= static_cast<uint32_t>((*l1_mem_)[addr + 3]) << 24;
+  value |= static_cast<uint32_t>(buf[0]);
+  value |= static_cast<uint32_t>(buf[1]) << 8;
+  value |= static_cast<uint32_t>(buf[2]) << 16;
+  value |= static_cast<uint32_t>(buf[3]) << 24;
   return value;
 }
 
 void NocOverlay::l1_write_u32(uint64_t addr, uint32_t value) {
-  if (l1_mem_ == nullptr || addr + 4 > l1_mem_->size()) {
+  size_t l1_size = l1_mem_if_ ? l1_mem_if_->size()
+                              : (l1_mem_ ? l1_mem_->size() : 0);
+  if ((l1_mem_if_ == nullptr && l1_mem_ == nullptr) || addr + 4 > l1_size) {
     return;
   }
-  (*l1_mem_)[addr] = value & 0xFF;
-  (*l1_mem_)[addr + 1] = (value >> 8) & 0xFF;
-  (*l1_mem_)[addr + 2] = (value >> 16) & 0xFF;
-  (*l1_mem_)[addr + 3] = (value >> 24) & 0xFF;
+  uint8_t buf[4] = {
+      static_cast<uint8_t>(value & 0xFFu),
+      static_cast<uint8_t>((value >> 8) & 0xFFu),
+      static_cast<uint8_t>((value >> 16) & 0xFFu),
+      static_cast<uint8_t>((value >> 24) & 0xFFu),
+  };
+  if (l1_mem_if_) {
+    l1_mem_if_->write(addr, buf, sizeof(buf));
+  } else {
+    std::copy(buf, buf + 4, l1_mem_->begin() + addr);
+  }
 }
 
 void NocOverlay::l1_read_block(uint64_t addr, uint8_t* data, size_t len) const {
-  if (l1_mem_ == nullptr) {
+  size_t l1_size = l1_mem_if_ ? l1_mem_if_->size()
+                              : (l1_mem_ ? l1_mem_->size() : 0);
+  if ((l1_mem_if_ == nullptr && l1_mem_ == nullptr) || addr + len > l1_size) {
     return;
   }
-  for (size_t i = 0; i < len && addr + i < l1_mem_->size(); ++i) {
-    data[i] = (*l1_mem_)[addr + i];
+  if (l1_mem_if_) {
+    l1_mem_if_->read(addr, data, len);
+  } else {
+    std::copy(l1_mem_->begin() + addr, l1_mem_->begin() + addr + len, data);
   }
 }
 
 void NocOverlay::l1_write_block(uint64_t addr, const uint8_t* data, size_t len) {
-  if (l1_mem_ == nullptr) {
+  size_t l1_size = l1_mem_if_ ? l1_mem_if_->size()
+                              : (l1_mem_ ? l1_mem_->size() : 0);
+  if ((l1_mem_if_ == nullptr && l1_mem_ == nullptr) || addr + len > l1_size) {
     return;
   }
-  for (size_t i = 0; i < len && addr + i < l1_mem_->size(); ++i) {
-    (*l1_mem_)[addr + i] = data[i];
+  if (l1_mem_if_) {
+    l1_mem_if_->write(addr, data, len);
+  } else {
+    std::copy(data, data + len, l1_mem_->begin() + addr);
   }
 }
 
@@ -1238,7 +1266,7 @@ void NocOverlay::write_reg(uint8_t stream_id, uint8_t reg_id, uint32_t value) {
 // ============================================================================
 
 void NocOverlay::load_config_from_l1(unsigned stream_id) {
-  if (l1_mem_ == nullptr) {
+  if (l1_mem_if_ == nullptr && l1_mem_ == nullptr) {
     return;
   }
 
@@ -1311,6 +1339,7 @@ void NocOverlay::send_handshake_request(unsigned stream_id) {
   flit.stream_id = stream.regs.remote_dest_stream_id;
   flit.flit_index = 0;
   flit.total_flits = 1;
+  flit.deliver_to_overlay = true;
 
   // Encode handshake packet type and phase in data
   flit.data.fill(0);
@@ -1345,6 +1374,7 @@ void NocOverlay::send_handshake_response(unsigned stream_id) {
   flit.stream_id = stream.regs.remote_src_stream_id;
   flit.flit_index = 0;
   flit.total_flits = 1;
+  flit.deliver_to_overlay = true;
 
   // Encode handshake response with buffer space available
   flit.data.fill(0);
@@ -1421,6 +1451,7 @@ void NocOverlay::send_flow_control_update(unsigned stream_id) {
   flit.stream_id = stream.regs.remote_src_stream_id;
   flit.flit_index = 0;
   flit.total_flits = 1;
+  flit.deliver_to_overlay = true;
 
   flit.data.fill(0);
   flit.data[0] = static_cast<uint8_t>(OverlayPacketType::FlowControlUpdate);

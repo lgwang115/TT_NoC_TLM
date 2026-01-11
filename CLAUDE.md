@@ -16,9 +16,21 @@ cmake --build build
 
 # Run simulation
 ./build/noc_sim
+
+# Run all unit tests
+./build/noc_overlay_test
+
+# Run specific test suite
+./build/noc_overlay_test --gtest_filter=OverlayRegisterTest.*
+
+# List available tests
+./build/noc_overlay_test --gtest_list_tests
+
+# Disable tests during build
+cmake -S . -B build -DBUILD_TESTS=OFF
 ```
 
-SystemC can be auto-detected if `SYSTEMC_HOME` environment variable is set.
+SystemC can be auto-detected if `SYSTEMC_HOME` environment variable is set. Tests use Google Test (auto-downloaded via CMake FetchContent).
 
 ## Architecture
 
@@ -29,7 +41,7 @@ SystemC can be auto-detected if `SYSTEMC_HOME` environment variable is set.
 - **NocMesh** (`src/noc_mesh.*`): Assembles 2D torus topology, wires routers and links. Default 10x12 grid.
 - **NocRouter** (`src/noc_router.*`): Deterministic XY routing with 16 virtual channels. NoC0 routes right-then-down, NoC1 routes up-then-left.
 - **NocLink** (`src/noc_link.*`): Latency-modeled links (NIU: 5 cycles, router: 9 cycles).
-- **NocNiu** (`src/noc_niu.*`): Network Interface Unit - largest component (~1055 LOC). Handles MMIO registers, local memory, packet assembly/disassembly, atomic operations.
+- **NocNiu** (`src/noc_niu.*`): Network Interface Unit - handles MMIO registers, local memory, packet assembly/disassembly, atomic operations.
 - **NocOverlay** (`src/noc_overlay.*`): NoC Overlay coprocessor with 64 streams per Tensix tile. Assists with message-based data movement between tiles. Supports phase-based operation, receive buffer FIFOs, and message metadata tracking.
 - **TensixTile** (`src/tensix_tile.*`): Tile wrapper containing 5 RISC-V cores (B, T0, T1, T2, NC) and one NoC Overlay per spec. T-cores disabled by default (they drive Tensix coprocessor modeled elsewhere).
 - **RiscvCore** (`src/riscv_core.*`): Simple traffic generator that issues MMIO operations to NIUs.

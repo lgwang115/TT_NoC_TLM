@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "noc_types.h"
+#include "noc_l1_if.h"
 #include <systemc>
 
 // NoC Overlay coprocessor per WormholeB0 spec
@@ -263,11 +264,13 @@ SC_MODULE(NocOverlay) {
 
   // Pointer to shared L1 memory (set by TensixTile)
   void set_l1_memory(std::vector<uint8_t>* mem) { l1_mem_ = mem; }
+  void set_l1_memory_iface(NocL1MemoryIf* iface) { l1_mem_if_ = iface; }
 
  private:
   std::vector<OverlayStream> streams_;
   OverlayMsgHeaderFormat msg_header_format_;
   std::vector<uint8_t>* l1_mem_ = nullptr;
+  NocL1MemoryIf* l1_mem_if_ = nullptr;
 
   // Global registers (accessible via stream 0)
   uint64_t blob_auto_cfg_done_ = 0;  // 64-bit bitmask for auto-config completion

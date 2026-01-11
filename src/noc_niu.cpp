@@ -309,6 +309,33 @@ NocNiu::NocNiu(sc_core::sc_module_name name,
   SC_THREAD(cmd_loop);
   SC_THREAD(rx_loop);
   SC_THREAD(mmio_loop);
+  SC_THREAD(mmio_issue_loop);
+}
+
+size_t NocNiu::l1_size() const {
+  return l1_mem_if_ ? l1_mem_if_->size() : mem_.size();
+}
+
+void NocNiu::l1_read(uint64_t addr, uint8_t* dst, size_t len) const {
+  if (!dst || len == 0) {
+    return;
+  }
+  if (l1_mem_if_) {
+    l1_mem_if_->read(addr, dst, len);
+    return;
+  }
+  std::copy(mem_.begin() + addr, mem_.begin() + addr + len, dst);
+}
+
+void NocNiu::l1_write(uint64_t addr, const uint8_t* src, size_t len) {
+  if (!src || len == 0) {
+    return;
+  }
+  if (l1_mem_if_) {
+    l1_mem_if_->write(addr, src, len);
+    return;
+  }
+  std::copy(src, src + len, mem_.begin() + addr);
 }
 
 void NocNiu::cmd_loop() {
@@ -362,6 +389,9 @@ void NocNiu::cmd_loop() {
 void NocNiu::rx_loop() {
   while (true) {
     NocFlit flit = net_in.read();
+    if (flit.deliver_to_overlay && overlay_out.get_interface()) {
+      overlay_out->write(flit);
+    }
     auto &entry = inflight_[flit.packet_id];
     if (entry.received_flits == 0) {
       entry.packet.id = flit.packet_id;
@@ -414,10 +444,10 @@ void NocNiu::rx_loop() {
     if (entry.received_flits == flit.total_flits) {
       if (entry.packet.is_response) {
         if (entry.packet.req_type == NocReqType::Read && !entry.packet.payload.empty()) {
-          if (entry.packet.addr + entry.packet.payload.size() <= mem_.size()) {
-            std::copy(entry.packet.payload.begin(),
-                      entry.packet.payload.end(),
-                      mem_.begin() + entry.packet.addr);
+          if (entry.packet.addr + entry.packet.payload.size() <= l1_size()) {
+            l1_write(entry.packet.addr,
+                     entry.packet.payload.data(),
+                     entry.packet.payload.size());
           }
         }
         if (entry.packet.req_type == NocReqType::Read) {
@@ -458,6 +488,21 @@ void NocNiu::mmio_loop() {
       NiuMmioResp resp;
       resp.data = mmio_read(req.addr);
       mmio_out.write(resp);
+    }
+  }
+}
+
+void NocNiu::mmio_issue_loop() {
+  while (true) {
+    if (pending_mmio_issues_.empty()) {
+      wait(mmio_issue_event_);
+      continue;
+    }
+    size_t idx = pending_mmio_issues_.front();
+    pending_mmio_issues_.pop_front();
+    issue_from_initiator(idx);
+    if (idx < initiators_.size()) {
+      initiators_[idx].cmd_ctrl &= ~0x1u;
     }
   }
 }
@@ -681,8 +726,8 @@ void NocNiu::mmio_write(uint32_t addr, uint32_t data) {
       case kNocCmdCtrl:
         regs.cmd_ctrl = data;
         if (data & 0x1u) {
-          issue_from_initiator(idx);
-          regs.cmd_ctrl &= ~0x1u;
+          pending_mmio_issues_.push_back(idx);
+          mmio_issue_event_.notify(sc_core::SC_ZERO_TIME);
         }
         return;
       default:
@@ -965,9 +1010,9 @@ void NocNiu::issue_from_initiator(size_t idx) {
         copy.addr = (ret_addr & ~0xFULL) + i * max_payload;
         copy.ret_addr = (targ_addr & ~0xFULL) + i * max_payload;
         uint64_t base = wr_be ? (read_base) : (targ_addr + i * max_payload);
-        if (base + len <= mem_.size()) {
+        if (base + len <= l1_size()) {
           copy.payload.resize(len);
-          std::copy(mem_.begin() + base, mem_.begin() + base + len, copy.payload.begin());
+          l1_read(base, copy.payload.data(), len);
         }
         uint32_t data_flits = static_cast<uint32_t>((copy.payload.size() + 31) / 32);
         send_write_chunk(copy, !resp_marked, data_flits);
@@ -1074,16 +1119,21 @@ void NocNiu::handle_request(const NocPacket &packet) {
     } else {
       inc_counter(kCounterSlvNonpostedWrReqStarted);
     }
-    if (!packet.payload.empty() && packet.addr + packet.payload.size() <= mem_.size()) {
+    if (!packet.payload.empty() && packet.addr + packet.payload.size() <= l1_size()) {
       if (packet.has_byte_enable && packet.payload.size() <= 32) {
         uint64_t base = packet.addr & ~0xFULL;
-        for (size_t i = 0; i < packet.payload.size(); ++i) {
-          if (packet.byte_enable & (1u << i)) {
-            mem_[base + i] = packet.payload[i];
+        std::vector<uint8_t> buf(packet.payload.size(), 0);
+        if (base + buf.size() <= l1_size()) {
+          l1_read(base, buf.data(), buf.size());
+          for (size_t i = 0; i < packet.payload.size(); ++i) {
+            if (packet.byte_enable & (1u << i)) {
+              buf[i] = packet.payload[i];
+            }
           }
+          l1_write(base, buf.data(), buf.size());
         }
       } else {
-        std::copy(packet.payload.begin(), packet.payload.end(), mem_.begin() + packet.addr);
+        l1_write(packet.addr, packet.payload.data(), packet.payload.size());
       }
     }
     uint32_t data_flits = static_cast<uint32_t>((packet.payload.size() + 31) / 32);
@@ -1101,10 +1151,8 @@ void NocNiu::handle_request(const NocPacket &packet) {
     if (packet.posted && packet.header_store) {
       uint64_t store_addr = static_cast<uint64_t>(packet.atomic_imm) << 4;
       size_t copy_len = std::min<size_t>(16, packet.payload.size());
-      if (store_addr + copy_len <= mem_.size()) {
-        std::copy(packet.payload.begin(),
-                  packet.payload.begin() + copy_len,
-                  mem_.begin() + store_addr);
+      if (store_addr + copy_len <= l1_size()) {
+        l1_write(store_addr, packet.payload.data(), copy_len);
       }
     }
     return;
@@ -1113,9 +1161,9 @@ void NocNiu::handle_request(const NocPacket &packet) {
   if (packet.req_type == NocReqType::Read) {
     inc_counter(kCounterSlvRdReqReceived);
     std::vector<uint8_t> data;
-    if (packet.addr + packet.length <= mem_.size()) {
+    if (packet.addr + packet.length <= l1_size()) {
       data.resize(packet.length);
-      std::copy(mem_.begin() + packet.addr, mem_.begin() + packet.addr + packet.length, data.begin());
+      l1_read(packet.addr, data.data(), data.size());
     }
     inc_counter(kCounterSlvRdRespSent);
     inc_counter(kCounterSlvRdDataFlitSent, static_cast<uint32_t>((data.size() + 31) / 32));
@@ -1144,19 +1192,22 @@ void NocNiu::handle_request(const NocPacket &packet) {
         break;
       }
       case 3: {
-        if (base + 16 > mem_.size()) {
+        if (base + 16 > l1_size()) {
           break;
         }
         uint16_t to_write[2] = {static_cast<uint16_t>(packet.atomic_imm & 0xFFFFu),
                                 static_cast<uint16_t>(packet.atomic_imm >> 16)};
+        std::vector<uint8_t> buf(16, 0);
+        l1_read(base, buf.data(), buf.size());
         for (unsigned i = 0; i < 8; ++i) {
           if (decoded.mask & (1u << i)) {
             uint16_t val = to_write[i & 1];
-            size_t off = base + i * 2;
-            mem_[off] = static_cast<uint8_t>(val & 0xFFu);
-            mem_[off + 1] = static_cast<uint8_t>((val >> 8) & 0xFFu);
+            size_t off = i * 2;
+            buf[off] = static_cast<uint8_t>(val & 0xFFu);
+            buf[off + 1] = static_cast<uint8_t>((val >> 8) & 0xFFu);
           }
         }
+        l1_write(base, buf.data(), buf.size());
         break;
       }
       case 4: {
@@ -1212,25 +1263,30 @@ void NocNiu::send_response(const NocPacket &request, const std::vector<uint8_t> 
 }
 
 uint32_t NocNiu::load_u32(uint64_t addr) const {
-  if (addr + 4 > mem_.size()) {
+  if (addr + 4 > l1_size()) {
     return 0;
   }
   uint32_t value = 0;
-  value |= static_cast<uint32_t>(mem_[addr]);
-  value |= static_cast<uint32_t>(mem_[addr + 1]) << 8;
-  value |= static_cast<uint32_t>(mem_[addr + 2]) << 16;
-  value |= static_cast<uint32_t>(mem_[addr + 3]) << 24;
+  uint8_t buf[4] = {0, 0, 0, 0};
+  l1_read(addr, buf, sizeof(buf));
+  value |= static_cast<uint32_t>(buf[0]);
+  value |= static_cast<uint32_t>(buf[1]) << 8;
+  value |= static_cast<uint32_t>(buf[2]) << 16;
+  value |= static_cast<uint32_t>(buf[3]) << 24;
   return value;
 }
 
 void NocNiu::store_u32(uint64_t addr, uint32_t value) {
-  if (addr + 4 > mem_.size()) {
+  if (addr + 4 > l1_size()) {
     return;
   }
-  mem_[addr] = static_cast<uint8_t>(value & 0xFFu);
-  mem_[addr + 1] = static_cast<uint8_t>((value >> 8) & 0xFFu);
-  mem_[addr + 2] = static_cast<uint8_t>((value >> 16) & 0xFFu);
-  mem_[addr + 3] = static_cast<uint8_t>((value >> 24) & 0xFFu);
+  uint8_t buf[4] = {
+      static_cast<uint8_t>(value & 0xFFu),
+      static_cast<uint8_t>((value >> 8) & 0xFFu),
+      static_cast<uint8_t>((value >> 16) & 0xFFu),
+      static_cast<uint8_t>((value >> 24) & 0xFFu),
+  };
+  l1_write(addr, buf, sizeof(buf));
 }
 
 bool NocNiu::validate_request_alignment(uint64_t src_addr, uint64_t dst_addr,
